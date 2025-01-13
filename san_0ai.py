@@ -11,6 +11,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
 import sqlite3
 from datetime import datetime
+import pyicloud
 
 # Import des modules locaux
 from Modules.assistant.memory import MemoryManager
@@ -21,6 +22,12 @@ from Modules.assistant.nlp_processor import NLPProcessor
 from Modules.assistant.image_generator import ImageGenerator
 from Modules.assistant.web_researcher import WebResearcher
 from Modules.assistant.code_generator import CodeGenerator
+from Modules.assistant.mail import ICloudMailAssistant
+from Modules.assistant.agenda import AgendaAssistant
+import re
+from dateutil import parser
+
+import re
 
 class KnowledgeBase:
     def __init__(self, db_path='knowledge.db'):
@@ -100,6 +107,7 @@ class SanAI:
         
         self.model = GPT2LMHeadModel.from_pretrained(model_name, config=config).to(self.device)
         self.model.train()
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=1e-5)
         
         self.conversation_history = []
         self.logger = self._setup_logging()
@@ -120,6 +128,8 @@ class SanAI:
         self.image_generator = ImageGenerator()
         self.web_researcher = WebResearcher()
         self.code_generator = CodeGenerator()
+        self.icloud_mail = None
+        self.icloud_calendar = None
         
     def _setup_logging(self):
         logger = logging.getLogger('SanAI')
@@ -139,7 +149,39 @@ class SanAI:
             epochs=10
         )
         
+    def connect_icloud(self, email, password):
+        """Connecte l'assistant aux services iCloud"""
+        try:
+            self.icloud_mail = ICloudMailAssistant(email, password)
+            self.icloud_calendar = AgendaAssistant()
+            return True
+        except Exception as e:
+            self.logger.error(f"Erreur de connexion iCloud: {str(e)}")
+            return False
+
     def process_input(self, user_input):
+        # Ajouter au début de la méthode
+        if "email" in user_input.lower() or "mail" in user_input.lower():
+            if not self.icloud_mail:
+                return "Veuillez d'abord me connecter à iCloud."
+            # Gestion des emails
+            if "envoyer" in user_input.lower():
+                return self.icloud_mail.send_email(
+                    to_email=self._extract_email(user_input),
+                    subject=self._extract_subject(user_input),
+                    body=self._extract_body(user_input)
+                )
+            
+        elif "agenda" in user_input.lower() or "calendrier" in user_input.lower():
+            if not self.icloud_calendar:
+                return "Veuillez d'abord me connecter à iCloud."
+            # Gestion du calendrier
+            if "ajouter" in user_input.lower():
+                event_details = self._extract_event_details(user_input)
+                return self.icloud_calendar.add_event(**event_details)
+            elif "voir" in user_input.lower():
+                return self.icloud_calendar.get_events_for_day(self._extract_date(user_input))
+
         # Analyse émotionnelle de l'entrée
         emotional_context = self.emotional_state.analyze(user_input)
         personality_context = self.personality_engine.get_context()
@@ -364,6 +406,73 @@ class SanAI:
             })
             
         return knowledge
+
+    def _extract_email(self, text):
+        """Extract email address from text using simple pattern matching"""
+        email_pattern = r'[\w\.-]+@[\w\.-]+\.\w+'
+        matches = re.findall(email_pattern, text)
+        return matches[0] if matches else ""
+
+    def _extract_subject(self, text):
+        """Extract email subject from text"""
+        # Look for subject after "subject:" or "sujet:" (case insensitive)
+        subject_pattern = r'(?:subject|sujet)\s*:\s*([^\n]+)'
+        match = re.search(subject_pattern, text, re.IGNORECASE)
+        return match.group(1).strip() if match else ""
+
+    def _extract_body(self, text):
+        """Extract email body from text"""
+        # Look for message body after "body:", "message:", or "contenu:" (case insensitive)
+        body_pattern = r'(?:body|message|contenu)\s*:\s*(.+?)(?:\s*$|\s*subject|\s*to:)'
+        match = re.search(body_pattern, text, re.IGNORECASE | re.DOTALL)
+        return match.group(1).strip() if match else ""
+
+    def _extract_event_details(self, text):
+        """Extract calendar event details from text"""
+
+        # Extract title
+        title_pattern = r'(?:title|titre|événement)\s*:\s*([^\n]+)'
+        title_match = re.search(title_pattern, text, re.IGNORECASE)
+        title = title_match.group(1).strip() if title_match else ""
+
+        # Extract date and time
+        date_pattern = r'(?:date|le)\s*:\s*([^\n]+)'
+        date_match = re.search(date_pattern, text, re.IGNORECASE)
+        try:
+            date = parser.parse(date_match.group(1)) if date_match else datetime.now()
+        except:
+            date = datetime.now()
+
+        # Extract duration (in minutes)
+        duration_pattern = r'(?:duration|durée)\s*:\s*(\d+)'
+        duration_match = re.search(duration_pattern, text, re.IGNORECASE)
+        duration = int(duration_match.group(1)) if duration_match else 60
+
+        # Extract description
+        desc_pattern = r'(?:description|détails)\s*:\s*([^\n]+)'
+        desc_match = re.search(desc_pattern, text, re.IGNORECASE)
+        description = desc_match.group(1).strip() if desc_match else ""
+
+        return {
+            "title": title,
+            "date": date.strftime("%Y-%m-%d %H:%M"),
+            "duration": duration,
+            "description": description
+        }
+
+    def _extract_date(self, text):
+        """Extract date from text using natural language processing"""
+
+        # Look for date patterns in text
+        date_pattern = r'(?:le|pour|date)\s*:?\s*([^\n]+)'
+        match = re.search(date_pattern, text, re.IGNORECASE)
+        if match:
+            try:
+                date = parser.parse(match.group(1), dayfirst=True)
+                return date.strftime("%Y-%m-%d")
+            except:
+                pass
+        return datetime.now().strftime("%Y-%m-%d")
 
 class EmotionalState:
     def __init__(self):
