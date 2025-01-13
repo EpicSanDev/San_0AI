@@ -6,6 +6,15 @@ import logging
 import os
 import json
 import torch.nn.functional as F
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer
+
+# Import des modules locaux
+from Modules.assistant.memory import MemoryManager
+from Modules.assistant.learning_monitor import LearningMonitor
+from Modules.assistant.adaptive_learning import AdaptiveLearning, LearningMetrics
+from Modules.assistant.response_generator import ResponseGenerator
 
 class SanAI:
     def __init__(self, model_name='gpt2-large'):
