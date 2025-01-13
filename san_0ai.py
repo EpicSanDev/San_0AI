@@ -36,6 +36,15 @@ from dateutil import parser
 
 import re
 
+# Import des nouveaux modules
+from Modules.assistant.emotional_intelligence import EmotionalIntelligence
+from Modules.assistant.knowledge_synthesis import KnowledgeSynthesis
+from Modules.assistant.creativity_engine import CreativityEngine
+from Modules.assistant.decision_making import DecisionMaking
+from Modules.assistant.ethical_framework import EthicalFramework
+from Modules.assistant.abstraction_learning import AbstractionLearning
+from Modules.assistant.prediction_engine import PredictionEngine
+
 class KnowledgeBase:
     def __init__(self, db_path='knowledge.db'):
         self.db_path = db_path
@@ -149,6 +158,15 @@ class SanAI:
         self.pattern_recognition = PatternRecognitionModule()
         self.causal_reasoning = CausalReasoningEngine()
         self.memory_consolidation = MemoryConsolidation()
+        
+        # Nouveaux composants cognitifs
+        self.emotional_intelligence = EmotionalIntelligence()
+        self.knowledge_synthesis = KnowledgeSynthesis()
+        self.creativity_engine = CreativityEngine()
+        self.decision_making = DecisionMaking()
+        self.ethical_framework = EthicalFramework()
+        self.abstraction_learning = AbstractionLearning()
+        self.prediction_engine = PredictionEngine()
         
     def _setup_logging(self):
         logger = logging.getLogger('SanAI')
@@ -337,6 +355,37 @@ class SanAI:
         # Amélioration basée sur le feedback
         response_quality = self.feedback_analyzer.analyze(response)
         self.adaptive_learning.update_strategy(response_quality)
+        
+        # Analyse émotionnelle avancée
+        emotional_insight = self.emotional_intelligence.analyze_emotions(user_input)
+        empathetic_response = self.emotional_intelligence.generate_empathetic_response(emotional_insight)
+        
+        # Synthèse des connaissances
+        knowledge_context = self.knowledge_synthesis.synthesize_relevant_knowledge(user_input)
+        
+        # Génération créative
+        creative_elements = self.creativity_engine.generate_creative_insights(user_input)
+        
+        # Prise de décision éthique
+        ethical_assessment = self.ethical_framework.evaluate_response(response)
+        if not ethical_assessment.is_appropriate:
+            response = self.ethical_framework.adjust_response(response)
+            
+        # Apprentissage par abstraction
+        abstract_concepts = self.abstraction_learning.extract_abstract_concepts(user_input)
+        self.knowledge_base.integrate_abstractions(abstract_concepts)
+        
+        # Prédictions et anticipation
+        predictions = self.prediction_engine.predict_user_needs(user_input)
+        proactive_suggestions = self.prediction_engine.generate_suggestions(predictions)
+        
+        # Amélioration de la réponse finale
+        response = self.response_generator.enhance_response(
+            response,
+            empathetic_response,
+            creative_elements,
+            proactive_suggestions
+        )
         
         return response
         
