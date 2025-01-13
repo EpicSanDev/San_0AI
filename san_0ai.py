@@ -9,16 +9,88 @@ import torch.nn.functional as F
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
+import sqlite3
+from datetime import datetime
 
 # Import des modules locaux
 from Modules.assistant.memory import MemoryManager
 from Modules.assistant.learning_monitor import LearningMonitor
 from Modules.assistant.adaptive_learning import AdaptiveLearning, LearningMetrics
 from Modules.assistant.response_generator import ResponseGenerator
+from Modules.assistant.nlp_processor import NLPProcessor
+from Modules.assistant.image_generator import ImageGenerator
+from Modules.assistant.web_researcher import WebResearcher
+from Modules.assistant.code_generator import CodeGenerator
+
+class KnowledgeBase:
+    def __init__(self, db_path='knowledge.db'):
+        self.db_path = db_path
+        self.setup_database()
+        
+    def setup_database(self):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        # Création des tables
+        c.execute('''CREATE TABLE IF NOT EXISTS facts
+                    (id INTEGER PRIMARY KEY, fact TEXT, category TEXT, 
+                     confidence FLOAT, timestamp DATETIME)''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS relationships
+                    (id INTEGER PRIMARY KEY, fact1_id INTEGER, fact2_id INTEGER, 
+                     relation_type TEXT, confidence FLOAT)''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS concepts
+                    (id INTEGER PRIMARY KEY, concept TEXT, description TEXT, 
+                     examples TEXT)''')
+        
+        conn.commit()
+        conn.close()
+    
+    def add_fact(self, fact, category, confidence=1.0):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute("INSERT INTO facts (fact, category, confidence, timestamp) VALUES (?, ?, ?, ?)",
+                 (fact, category, confidence, datetime.now()))
+        conn.commit()
+        conn.close()
+    
+    def query_knowledge(self, query, category=None):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        if category:
+            c.execute("SELECT fact FROM facts WHERE fact LIKE ? AND category = ?",
+                     (f"%{query}%", category))
+        else:
+            c.execute("SELECT fact FROM facts WHERE fact LIKE ?", (f"%{query}%",))
+            
+        results = c.fetchall()
+        conn.close()
+        return [r[0] for r in results]
+    
+    def add_relationship(self, fact1_id, fact2_id, relation_type, confidence=1.0):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute("INSERT INTO relationships (fact1_id, fact2_id, relation_type, confidence) VALUES (?, ?, ?, ?)",
+                 (fact1_id, fact2_id, relation_type, confidence))
+        conn.commit()
+        conn.close()
 
 class SanAI:
     def __init__(self, model_name='gpt2-large'):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Détection automatique du meilleur device disponible
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+            # Optimisations CUDA
+            torch.backends.cudnn.benchmark = True
+            torch.cuda.empty_cache()
+            print(f"Utilisation de CUDA avec {torch.cuda.device_count()} GPU(s)")
+            print(f"GPU principal : {torch.cuda.get_device_name(0)}")
+        else:
+            self.device = torch.device("cpu")
+            print("Utilisation du CPU")
+        
         self.tokenizer = GPT2Tokenizer.from_pretrained(model_name)
         
         # Configuration avancée du modèle
@@ -40,6 +112,14 @@ class SanAI:
         self.personality_engine = PersonalityEngine()
         self.adaptive_learning = AdaptiveLearning()
         self.response_generator = ResponseGenerator(self.model, self.tokenizer)
+        self.meta_learning = MetaLearning()
+        self.knowledge_graph = KnowledgeGraph()
+        self.reasoning_engine = ReasoningEngine()
+        self.knowledge_base = KnowledgeBase()
+        self.nlp_processor = NLPProcessor()
+        self.image_generator = ImageGenerator()
+        self.web_researcher = WebResearcher()
+        self.code_generator = CodeGenerator()
         
     def _setup_logging(self):
         logger = logging.getLogger('SanAI')
@@ -99,7 +179,19 @@ class SanAI:
         
         # Sélection de la meilleure réponse
         responses = [self.tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
+        
+        # Analyse métacognitive
+        meta_context = self.meta_learning.analyze_current_state()
+        
+        # Raisonnement avancé
+        reasoning_result = self.reasoning_engine.analyze(user_input, meta_context)
+        
+        # Mise à jour du graphe de connaissances
+        self.knowledge_graph.update(user_input, reasoning_result)
+        
+        # Amélioration de la sélection de réponse
         response = self._select_best_response(responses, user_input)
+        response = self.reasoning_engine.enhance_response(response, reasoning_result)
         
         # Stocker la nouvelle interaction en mémoire
         response_embedding = self.embedding_model.encode([response])[0]
@@ -133,6 +225,43 @@ class SanAI:
         new_lr, new_batch = self.adaptive_learning.adjust_parameters(metrics)
         self._update_learning_parameters(new_lr, new_batch)
         
+        # Auto-amélioration
+        self.meta_learning.update(user_input, response, metrics)
+        
+        # Recherche de connaissances pertinentes
+        relevant_knowledge = self.knowledge_base.query_knowledge(user_input)
+        
+        # Ajout des connaissances au contexte
+        context = f"Knowledge context:\n"
+        for knowledge in relevant_knowledge:
+            context += f"- {knowledge}\n"
+            
+        # Stockage des nouvelles connaissances
+        if response:
+            self.knowledge_base.add_fact(
+                fact=response,
+                category="conversation",
+                confidence=self._calculate_confidence(outputs)
+            )
+        
+        # Analyse NLP avancée
+        nlp_analysis = self.nlp_processor.analyze_text(user_input)
+        
+        # Recherche web si nécessaire
+        if "recherche" in user_input.lower():
+            web_results = self.web_researcher.search(user_input)
+            context += f"\nWeb results: {web_results}\n"
+            
+        # Génération de code si demandé
+        if "générer du code" in user_input.lower():
+            generated_code = self.code_generator.generate_code(user_input)
+            response = f"Voici le code généré :\n```\n{generated_code}\n```"
+            
+        # Génération d'image si demandé
+        if "générer une image" in user_input.lower():
+            image = self.image_generator.generate_image(user_input)
+            # Sauvegarder l'image et retourner le chemin
+        
         return response
         
     def _compute_dynamic_attention(self, inputs):
@@ -147,7 +276,15 @@ class SanAI:
         scores = []
         for response in responses:
             coherence_score = self._calculate_coherence(query, response)
-            scores.append(coherence_score)
+            knowledge_score = self.knowledge_graph.evaluate_relevance(response)
+            reasoning_score = self.reasoning_engine.evaluate_logic(response)
+            
+            combined_score = (
+                coherence_score * 0.3 +
+                knowledge_score * 0.4 +
+                reasoning_score * 0.3
+            )
+            scores.append(combined_score)
         return responses[scores.index(max(scores))]
         
     def learn_from_interaction(self, conversation_history):
@@ -163,6 +300,15 @@ class SanAI:
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
+        
+        # Extraction et stockage des connaissances
+        extracted_knowledge = self._extract_knowledge(conversation_history)
+        for knowledge in extracted_knowledge:
+            self.knowledge_base.add_fact(
+                fact=knowledge['fact'],
+                category=knowledge['category'],
+                confidence=knowledge['confidence']
+            )
         
         return loss.item()
         
@@ -184,7 +330,7 @@ class SanAI:
             
             # Charger l'historique des conversations
             history_path = os.path.join(path, 'conversation_history.json')
-            if os.path.exists(history_path):
+            if (os.path.exists(history_path)):
                 with open(history_path, 'r') as f:
                     self.conversation_history = json.load(f)
                     
@@ -202,6 +348,22 @@ class SanAI:
         embeddings = self.embedding_model.encode(responses)
         similarities = cosine_similarity(embeddings)
         return 1.0 - np.mean(similarities[np.triu_indices(len(responses), k=1)])
+
+    def _extract_knowledge(self, text):
+        # Analyse du texte pour extraire des connaissances pertinentes
+        knowledge = []
+        
+        # Utilisation du reasoning engine pour l'extraction
+        analysis = self.reasoning_engine.analyze(text, {})
+        
+        if analysis:
+            knowledge.append({
+                'fact': analysis['main_point'],
+                'category': 'learned_concept',
+                'confidence': analysis['confidence']
+            })
+            
+        return knowledge
 
 class EmotionalState:
     def __init__(self):
@@ -239,3 +401,54 @@ class PersonalityEngine:
         
     def get_context(self):
         return " | ".join(f"{trait}: {value}" for trait, value in self.traits.items())
+
+class MetaLearning:
+    def __init__(self):
+        self.performance_history = []
+        self.learning_patterns = {}
+        self.adaptation_strategies = {}
+
+    def analyze_current_state(self):
+        # Analyse des performances et patterns d'apprentissage
+        return {
+            'performance_trend': self._analyze_performance_trend(),
+            'learning_efficiency': self._calculate_learning_efficiency(),
+            'adaptation_needs': self._identify_adaptation_needs()
+        }
+
+    def update(self, input_data, output_data, metrics):
+        self.performance_history.append(metrics)
+        self._update_learning_patterns(input_data, output_data)
+        self._adjust_strategies()
+
+class ReasoningEngine:
+    def __init__(self):
+        self.logical_frameworks = []
+        self.inference_rules = {}
+        
+    def analyze(self, input_data, context):
+        # Analyse logique approfondie
+        logical_structure = self._extract_logical_structure(input_data)
+        inferences = self._apply_inference_rules(logical_structure)
+        return self._synthesize_reasoning(inferences, context)
+    
+    def enhance_response(self, response, reasoning):
+        # Amélioration de la réponse basée sur le raisonnement
+        return self._restructure_response(response, reasoning)
+
+class KnowledgeGraph:
+    def __init__(self):
+        self.nodes = {}
+        self.edges = {}
+        self.semantic_index = {}
+        
+    def update(self, input_data, reasoning):
+        # Mise à jour du graphe de connaissances
+        new_nodes = self._extract_concepts(input_data)
+        self._integrate_knowledge(new_nodes, reasoning)
+        self._update_semantic_index()
+
+    def evaluate_relevance(self, response):
+        # Évaluation de la pertinence basée sur le graphe de connaissances
+        concepts = self._extract_concepts(response)
+        return self._calculate_relevance_score(concepts)
