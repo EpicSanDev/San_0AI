@@ -103,7 +103,7 @@ class KnowledgeBase:
         conn.commit()
         conn.close()
 
-from transformers import LlamaTokenizer, LlamaForCausalLM
+from transformers import LlamaTokenizer, LlamaForCausalLM, LlamaConfig
 
 class SanAI:
     def __init__(self, model_name='NousResearch/Llama-2-7b-chat-hf'):
@@ -116,12 +116,16 @@ class SanAI:
             self.device = torch.device("cpu")
             print("Utilisation du CPU")
         
+        # Initialisation du tokenizer et du modèle
         self.tokenizer = LlamaTokenizer.from_pretrained(model_name)
-        config = self.tokenizer.config
+        
+        # Configuration du modèle
+        model_config = LlamaConfig.from_pretrained(model_name)
         
         # Chargement du modèle avec des paramètres optimisés pour la mémoire
         self.model = LlamaForCausalLM.from_pretrained(
             model_name,
+            config=model_config,
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             device_map="auto",
             load_in_8bit=True  # Utilisation de la quantification 8-bit
@@ -198,6 +202,9 @@ class SanAI:
             ]
         )
         
+        # Initialisation de l'optimiseur après le modèle
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=1e-5)
+        
     def _setup_logging(self):
         logger = logging.getLogger('SanAI')
         logger.setLevel(logging.INFO)
@@ -208,13 +215,14 @@ class SanAI:
         return logger
         
     def _setup_advanced_training(self):
-        # Ajout de techniques d'apprentissage avancées
-        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            self.optimizer, 
-            max_lr=2e-5,
-            steps_per_epoch=100,
-            epochs=10
-        )
+        # Vérification que l'optimiseur existe
+        if hasattr(self, 'optimizer'):
+            self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                self.optimizer, 
+                max_lr=2e-5,
+                steps_per_epoch=100,
+                epochs=10
+            )
         
     def connect_icloud(self, email, password):
         """Connecte l'assistant aux services iCloud"""
