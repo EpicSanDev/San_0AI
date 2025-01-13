@@ -28,6 +28,9 @@ class AdaptiveLearning:
             'conservative': self._conservative_strategy,
         }
         self.current_strategy = 'default'
+        # Add attention mask and pad token config
+        self.attention_mask = None
+        self.pad_token_id = 50256  # Same as eos_token_id
         
     def adjust_parameters(self, metrics: LearningMetrics) -> Tuple[float, int]:
         self.history.append(metrics)
@@ -100,3 +103,17 @@ class AdaptiveLearning:
     def _high_gradient_strategy(self) -> Tuple[float, int]:
         """Stratégie en cas de gradient élevé"""
         return self.learning_rates[0], self.batch_sizes[-1]
+
+    def prepare_inputs(self, inputs):
+        """Prepare inputs with proper attention mask"""
+        # Create attention mask if needed
+        if self.attention_mask is None:
+            self.attention_mask = torch.ones_like(inputs)
+            # Mask pad tokens
+            self.attention_mask[inputs == self.pad_token_id] = 0
+        
+        return {
+            'input_ids': inputs,
+            'attention_mask': self.attention_mask,
+            'use_cache': False  # Disable caching when using gradient checkpointing 
+        }
