@@ -244,7 +244,6 @@ class SanAI:
         
         # Ajout de l'attention multi-tête améliorée
         attention_weights = self._compute_dynamic_attention(inputs)
-        
         outputs = self.model.generate(
             inputs,
             max_length=200,
@@ -252,8 +251,7 @@ class SanAI:
             do_sample=True,
             top_p=0.92,
             temperature=0.85,
-            repetition_penalty=1.2,
-            attention_weights=attention_weights
+            repetition_penalty=1.2
         )
         
         # Sélection de la meilleure réponse

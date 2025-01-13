@@ -80,3 +80,23 @@ class AdaptiveLearning:
         
     def _conservative_strategy(self) -> Tuple[float, int]:
         return min(self.learning_rates), max(self.batch_sizes)
+
+    def _default_strategy(self) -> Tuple[float, int]:
+        """Stratégie d'apprentissage par défaut"""
+        return self.learning_rates[2], self.batch_sizes[2]  # Valeurs médianes
+
+    def _plateau_strategy(self) -> Tuple[float, int]:
+        """Stratégie en cas de plateau dans l'apprentissage"""
+        current_lr_idx = self.learning_rates.index(self.history[-1].learning_rate)
+        new_lr_idx = min(current_lr_idx + 1, len(self.learning_rates) - 1)
+        return self.learning_rates[new_lr_idx], self.batch_sizes[2]
+
+    def _overfitting_strategy(self) -> Tuple[float, int]:
+        """Stratégie en cas de surapprentissage"""
+        current_bs_idx = self.batch_sizes.index(self.history[-1].batch_size)
+        new_bs_idx = min(current_bs_idx + 1, len(self.batch_sizes) - 1)
+        return self.learning_rates[1], self.batch_sizes[new_bs_idx]
+
+    def _high_gradient_strategy(self) -> Tuple[float, int]:
+        """Stratégie en cas de gradient élevé"""
+        return self.learning_rates[0], self.batch_sizes[-1]
