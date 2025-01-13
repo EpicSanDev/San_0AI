@@ -3,19 +3,78 @@ from sklearn.cluster import DBSCAN
 import numpy as np
 import torch
 import networkx as nx
-from transformers import TransformerEncoder
+import tensorflow as tf
+
+class TransformerEncoder(tf.keras.layers.Layer):
+    def __init__(self, num_layers, d_model, num_heads, dff, dropout_rate=0.1):
+        super().__init__()
+        
+        self.num_layers = num_layers
+        self.d_model = d_model
+        
+        self.attention_layers = [
+            tf.keras.layers.MultiHeadAttention(
+                num_heads=num_heads,
+                key_dim=d_model // num_heads,
+                dropout=dropout_rate
+            ) for _ in range(num_layers)
+        ]
+        
+        self.ffn_layers = [
+            tf.keras.Sequential([
+                tf.keras.layers.Dense(dff, activation='relu'),
+                tf.keras.layers.Dense(d_model),
+                tf.keras.layers.Dropout(dropout_rate)
+            ]) for _ in range(num_layers)
+        ]
+        
+        self.layernorms1 = [
+            tf.keras.layers.LayerNormalization() 
+            for _ in range(num_layers)
+        ]
+        
+        self.layernorms2 = [
+            tf.keras.layers.LayerNormalization() 
+            for _ in range(num_layers)
+        ]
+        
+    def call(self, x, training=True, mask=None):
+        for i in range(self.num_layers):
+            # Multi-head attention
+            attn_output = self.attention_layers[i](
+                query=x,
+                value=x,
+                key=x,
+                attention_mask=mask,
+                training=training
+            )
+            
+            # Add & norm
+            out1 = self.layernorms1[i](x + attn_output)
+            
+            # Feed forward
+            ffn_output = self.ffn_layers[i](out1)
+            
+            # Add & norm
+            x = self.layernorms2[i](out1 + ffn_output)
+            
+        return x
 
 class AbstractionLearning:
     def __init__(self):
         self.abstraction_levels = {}
         self.pattern_database = {}
         self.clustering_model = DBSCAN(eps=0.3, min_samples=2)
+        
+        # Use our custom TransformerEncoder
         self.encoder = TransformerEncoder(
             num_layers=6,
             d_model=512,
-            nhead=8,
-            dim_feedforward=2048
+            num_heads=8,
+            dff=2048,
+            dropout_rate=0.1
         )
+        
         self.concept_hierarchy = ConceptHierarchy()
         
     def extract_abstract_concepts(self, text: str) -> List[Dict]:

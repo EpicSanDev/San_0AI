@@ -5,7 +5,9 @@ from transformers import GPT2LMHeadModel, GPT2Tokenizer, GPT2Config
 import logging
 import os
 import json
+import hashlib
 import torch.nn.functional as F
+import concurrent.futures
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
@@ -33,7 +35,8 @@ from Modules.assistant.mail import ICloudMailAssistant
 from Modules.assistant.agenda import AgendaAssistant
 import re
 from dateutil import parser
-
+from collections import deque
+from cachetools import LRUCache, TTLCache
 import re
 
 # Import des nouveaux modules
@@ -100,30 +103,29 @@ class KnowledgeBase:
         conn.commit()
         conn.close()
 
+from transformers import LlamaTokenizer, LlamaForCausalLM
+
 class SanAI:
-    def __init__(self, model_name='gpt2-large'):
-        # Détection automatique du meilleur device disponible
+    def __init__(self, model_name='NousResearch/Llama-2-7b-chat-hf'):
+        # Utilisation de Llama 2 au lieu de GPT2
         if torch.cuda.is_available():
             self.device = torch.device("cuda")
-            # Optimisations CUDA
             torch.backends.cudnn.benchmark = True
-            torch.cuda.empty_cache()
             print(f"Utilisation de CUDA avec {torch.cuda.device_count()} GPU(s)")
-            print(f"GPU principal : {torch.cuda.get_device_name(0)}")
         else:
             self.device = torch.device("cpu")
             print("Utilisation du CPU")
         
-        self.tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+        self.tokenizer = LlamaTokenizer.from_pretrained(model_name)
+        config = self.tokenizer.config
         
-        # Configuration avancée du modèle
-        config = GPT2Config.from_pretrained(model_name)
-        config.attention_layers = 24
-        config.gradient_checkpointing = True
-        
-        self.model = GPT2LMHeadModel.from_pretrained(model_name, config=config).to(self.device)
-        self.model.train()
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=1e-5)
+        # Chargement du modèle avec des paramètres optimisés pour la mémoire
+        self.model = LlamaForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            device_map="auto",
+            load_in_8bit=True  # Utilisation de la quantification 8-bit
+        )
         
         self.conversation_history = []
         self.logger = self._setup_logging()
@@ -664,6 +666,8 @@ class MetaLearning:
         self.performance_history = []
         self.learning_patterns = {}
         self.adaptation_strategies = {}
+        self.min_history_length = 10  # Minimum history length for trend analysis
+        self.trend_window = 5  # Window size for trend calculation
 
     def analyze_current_state(self):
         # Analyse des performances et patterns d'apprentissage
@@ -673,10 +677,142 @@ class MetaLearning:
             'adaptation_needs': self._identify_adaptation_needs()
         }
 
+    def _analyze_performance_trend(self):
+        """Analyzes the trend in performance metrics over time."""
+        if len(self.performance_history) < self.min_history_length:
+            return "insufficient_data"
+            
+        recent_scores = [p.accuracy for p in self.performance_history[-self.trend_window:]]
+        if not recent_scores:
+            return "no_data"
+            
+        # Calculate trend using simple linear regression
+        x = list(range(len(recent_scores)))
+        y = recent_scores
+        n = len(recent_scores)
+        
+        if n < 2:
+            return "stable"
+            
+        # Calculate slope using least squares method
+        mean_x = sum(x) / n
+        mean_y = sum(y) / n
+        numerator = sum((x[i] - mean_x) * (y[i] - mean_y) for i in range(n))
+        denominator = sum((x[i] - mean_x) ** 2 for i in range(n))
+        
+        if denominator == 0:
+            return "stable"
+            
+        slope = numerator / denominator
+        
+        # Interpret trend
+        if slope > 0.05:
+            return "improving"
+        elif slope < -0.05:
+            return "declining"
+        else:
+            return "stable"
+
+    def _calculate_learning_efficiency(self):
+        """Calculates the current learning efficiency based on performance metrics."""
+        if not self.performance_history:
+            return 0.0
+            
+        recent_metrics = self.performance_history[-10:]
+        if not recent_metrics:
+            return 0.0
+            
+        # Calculate efficiency based on accuracy improvements and learning speed
+        accuracies = [m.accuracy for m in recent_metrics]
+        if len(accuracies) < 2:
+            return sum(accuracies) / len(accuracies)
+            
+        # Calculate rate of improvement
+        improvements = [accuracies[i] - accuracies[i-1] for i in range(1, len(accuracies))]
+        avg_improvement = sum(improvements) / len(improvements)
+        
+        # Normalize to 0-1 range
+        efficiency = min(max((avg_improvement + 1) / 2, 0), 1)
+        return efficiency
+
+    def _identify_adaptation_needs(self):
+        """Identifies areas where the system needs to adapt its learning strategy."""
+        needs = []
+        
+        if not self.performance_history:
+            return ["initial_calibration_needed"]
+            
+        trend = self._analyze_performance_trend()
+        efficiency = self._calculate_learning_efficiency()
+        
+        # Check for performance issues
+        if trend == "declining":
+            needs.append("strategy_adjustment_needed")
+        if efficiency < 0.3:
+            needs.append("efficiency_improvement_needed")
+            
+        # Check learning patterns
+        for pattern, occurrences in self.learning_patterns.items():
+            if occurrences > 10:  # If pattern appears frequently
+                needs.append(f"optimize_for_pattern_{pattern}")
+                
+        # Check adaptation strategies effectiveness
+        for strategy, metrics in self.adaptation_strategies.items():
+            if metrics.get('success_rate', 0) < 0.5:
+                needs.append(f"revise_strategy_{strategy}")
+                
+        return needs or ["no_immediate_adaptation_needed"]
+
     def update(self, input_data, output_data, metrics):
+        """Updates the learning history and patterns with new data."""
         self.performance_history.append(metrics)
         self._update_learning_patterns(input_data, output_data)
         self._adjust_strategies()
+        
+        # Trim history if too long
+        max_history = 1000
+        if len(self.performance_history) > max_history:
+            self.performance_history = self.performance_history[-max_history:]
+
+    def _update_learning_patterns(self, input_data, output_data):
+        """Updates the observed learning patterns based on new interactions."""
+        pattern = self._extract_interaction_pattern(input_data, output_data)
+        self.learning_patterns[pattern] = self.learning_patterns.get(pattern, 0) + 1
+
+    def _adjust_strategies(self):
+        """Adjusts adaptation strategies based on observed performance."""
+        if not self.performance_history:
+            return
+            
+        trend = self._analyze_performance_trend()
+        efficiency = self._calculate_learning_efficiency()
+        
+        # Update strategy success rates
+        for strategy in self.adaptation_strategies:
+            success_rate = self._evaluate_strategy_success(strategy)
+            self.adaptation_strategies[strategy]['success_rate'] = success_rate
+            
+        # Remove ineffective strategies
+        self.adaptation_strategies = {
+            k: v for k, v in self.adaptation_strategies.items()
+            if v.get('success_rate', 0) > 0.3
+        }
+
+    def _extract_interaction_pattern(self, input_data, output_data):
+        """Extracts a pattern identifier from an interaction."""
+        # Simple pattern extraction based on input/output characteristics
+        return f"pattern_{hash(str(input_data) + str(output_data)) % 1000}"
+
+    def _evaluate_strategy_success(self, strategy):
+        """Evaluates the success rate of an adaptation strategy."""
+        if strategy not in self.adaptation_strategies:
+            return 0.0
+            
+        strategy_metrics = self.adaptation_strategies[strategy].get('metrics', [])
+        if not strategy_metrics:
+            return 0.0
+            
+        return sum(metric.accuracy for metric in strategy_metrics) / len(strategy_metrics)
 
 class ReasoningEngine:
     def __init__(self):
@@ -684,14 +820,30 @@ class ReasoningEngine:
         self.inference_rules = {}
         
     def analyze(self, input_data, context):
-        # Analyse logique approfondie
-        logical_structure = self._extract_logical_structure(input_data)
-        inferences = self._apply_inference_rules(logical_structure)
-        return self._synthesize_reasoning(inferences, context)
+        return {
+            'main_point': self._extract_main_point(input_data),
+            'confidence': self._calculate_confidence(),
+            'logic_flow': self._analyze_logic(input_data, context)
+        }
+    
+    def _extract_main_point(self, input_data):
+        # Simple extraction du point principal
+        sentences = input_data.split('.')
+        return sentences[0] if sentences else input_data
+
+    def _calculate_confidence(self):
+        return 0.8  # Valeur par défaut pour commencer
+        
+    def _analyze_logic(self, input_data, context):
+        return {
+            'coherent': True,
+            'reasoning_steps': ['initial_understanding', 'basic_inference']
+        }
     
     def enhance_response(self, response, reasoning):
-        # Amélioration de la réponse basée sur le raisonnement
-        return self._restructure_response(response, reasoning)
+        if not reasoning['logic_flow']['coherent']:
+            return "Je ne suis pas sûr de comprendre. Pouvez-vous reformuler ?"
+        return response
 
 class KnowledgeGraph:
     def __init__(self):

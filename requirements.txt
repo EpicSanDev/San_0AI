@@ -1,8 +1,11 @@
-torch>=1.9.0
-transformers>=4.11.0
+torch>=2.0.0
+transformers>=4.31.0
 sentence-transformers>=2.2.0
 scikit-learn>=0.24.2
 numpy>=1.21.0
 sqlite3
 tqdm
 logging
+accelerate>=0.21.0
+bitsandbytes>=0.41.0
+sentencepiece>=0.1.99
