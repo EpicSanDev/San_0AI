@@ -12,6 +12,13 @@ from sentence_transformers import SentenceTransformer
 import sqlite3
 from datetime import datetime
 import pyicloud
+import networkx as nx
+from typing import Dict, List, Any
+from Modules.assistant.cognitive_control import CognitiveControl
+from Modules.assistant.memory_consolidation import MemoryConsolidation
+from Modules.assistant.working_memory import WorkingMemory
+from Modules.assistant.attention_system import AttentionSystem
+from Modules.assistant.self_improvement import SelfImprovementModule
 
 # Import des modules locaux
 from Modules.assistant.memory import MemoryManager
@@ -130,6 +137,18 @@ class SanAI:
         self.code_generator = CodeGenerator()
         self.icloud_mail = None
         self.icloud_calendar = None
+        
+        # Nouveaux composants
+        self.self_improvement = SelfImprovementModule()
+        self.concept_learner = ConceptLearningModule()
+        self.context_analyzer = ContextAnalyzer()
+        self.feedback_analyzer = FeedbackAnalyzer()
+        
+        # Nouveaux modules cognitifs
+        self.cognitive_architecture = CognitiveArchitecture()
+        self.pattern_recognition = PatternRecognitionModule()
+        self.causal_reasoning = CausalReasoningEngine()
+        self.memory_consolidation = MemoryConsolidation()
         
     def _setup_logging(self):
         logger = logging.getLogger('SanAI')
@@ -303,6 +322,21 @@ class SanAI:
         if "générer une image" in user_input.lower():
             image = self.image_generator.generate_image(user_input)
             # Sauvegarder l'image et retourner le chemin
+        
+        # Analyse approfondie du contexte
+        context = self.context_analyzer.analyze(user_input, self.conversation_history)
+        
+        # Auto-amélioration continue
+        self.self_improvement.analyze_performance(context)
+        
+        # Apprentissage de nouveaux concepts
+        new_concepts = self.concept_learner.extract_concepts(user_input)
+        if new_concepts:
+            self.knowledge_base.add_concepts(new_concepts)
+        
+        # Amélioration basée sur le feedback
+        response_quality = self.feedback_analyzer.analyze(response)
+        self.adaptive_learning.update_strategy(response_quality)
         
         return response
         
@@ -561,3 +595,63 @@ class KnowledgeGraph:
         # Évaluation de la pertinence basée sur le graphe de connaissances
         concepts = self._extract_concepts(response)
         return self._calculate_relevance_score(concepts)
+
+class ConceptLearningModule:
+    def __init__(self):
+        self.concept_patterns = []
+        self.learned_concepts = {}
+        
+    def extract_concepts(self, text):
+        # Extraction de nouveaux concepts à partir du texte
+        concepts = []
+        # Implémentation de l'extraction...
+        return concepts
+
+class ContextAnalyzer:
+    def analyze(self, input_text, history):
+        return {
+            'intent': self._detect_intent(input_text),
+            'emotion': self._analyze_emotion(input_text),
+            'context': self._extract_context(history),
+            'knowledge_gaps': self._identify_knowledge_gaps(input_text)
+        }
+
+class FeedbackAnalyzer:
+    def analyze(self, response):
+        # Analyse la qualité de la réponse
+        coherence = self._measure_coherence(response)
+        relevance = self._measure_relevance(response)
+        complexity = self._measure_complexity(response)
+        return (coherence + relevance + complexity) / 3
+
+class CognitiveArchitecture:
+    def __init__(self):
+        self.working_memory = WorkingMemory()
+        self.attention_system = AttentionSystem()
+        self.cognitive_control = CognitiveControl()
+        
+    def process_input(self, input_data):
+        attention_focus = self.attention_system.focus(input_data)
+        working_memory_state = self.working_memory.update(attention_focus)
+        return self.cognitive_control.regulate(working_memory_state)
+
+class PatternRecognitionModule:
+    def __init__(self):
+        self.pattern_database = {}
+        self.recognition_threshold = 0.75
+        self.learning_rate = 0.1
+        
+    def identify_patterns(self, data):
+        temporal_patterns = self._analyze_temporal_sequences(data)
+        semantic_patterns = self._analyze_semantic_structures(data)
+        return self._merge_patterns(temporal_patterns, semantic_patterns)
+
+class CausalReasoningEngine:
+    def __init__(self):
+        self.causal_graph = nx.DiGraph()
+        self.inference_rules = {}
+        
+    def infer_causality(self, events):
+        temporal_relations = self._analyze_temporal_order(events)
+        correlation_strength = self._measure_correlations(events)
+        return self._build_causal_model(temporal_relations, correlation_strength)
