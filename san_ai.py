@@ -69,44 +69,130 @@ class VoiceHandler:
         self.energy_threshold = 1000  # Seuil de détection du son
         self.recognizer.energy_threshold = self.energy_threshold
         self.recognizer.dynamic_energy_threshold = True
+        self.voice_speed = 1.0
+        self.voice_pitch = 1.0
+        self.noise_reduction = True
+        self.silence_threshold = 500  # Augmenter la sensibilité
+        self.noise_threshold = 0.02  # Seuil de bruit (0.0 à 1.0)
+        self.min_signal_level = 0.1  # Niveau minimal du signal
+        self.frame_duration = 0.5  # Durée d'une frame en secondes
 
     def speech_to_text(self, audio_file):
         try:
-            # Ajout de logs pour le debug
-            print(f"Traitement du fichier audio: {audio_file}")
+            # Amélioration du prétraitement audio
+            if self.noise_reduction:
+                # Appliquer la réduction de bruit
+                audio_data = self._reduce_noise(audio_file)
+            else:
+                audio_data = audio_file
+
+            # Augmenter la précision de la reconnaissance
+            result = self.model.transcribe(
+                audio_data,
+                language="fr",
+                task="transcribe",
+                temperature=0.2,
+                no_speech_threshold=0.6,
+                logprob_threshold=None
+            )
             
-            # Vérifier si le fichier est valide
-            if not os.path.exists(audio_file):
-                print("Fichier audio introuvable")
-                return ""
-                
-            # Essayer d'utiliser Whisper
-            try:
-                result = self.model.transcribe(audio_file, language="fr")
-                text = result["text"].strip()
-                print(f"Whisper transcription: {text}")
-                return text
-            except Exception as e:
-                print(f"Erreur Whisper: {e}")
-                
-                # Fallback sur speech_recognition
-                with sr.AudioFile(audio_file) as source:
-                    audio = self.recognizer.record(source)
-                    text = self.recognizer.recognize_google(audio, language='fr-FR')
-                    print(f"Google transcription: {text}")
-                    return text
-                    
+            text = result["text"].strip()
+            print(f"Texte reconnu amélioré: {text}")
+            return text
+
         except Exception as e:
-            print(f"Erreur dans speech_to_text: {e}")
+            print(f"Erreur dans speech_to_text amélioré: {e}")
             return ""
 
     def text_to_speech(self, text, lang='fr'):
-        tts = gTTS(text=text, lang=lang)
-        # Utiliser un nom de fichier basé sur un timestamp pour éviter les conflits
-        filename = f"{self.audio_dir}/speech_{datetime.now().timestamp()}.mp3"
-        tts.save(filename)
-        # Retourner le chemin relatif
-        return filename.replace(self.audio_dir + '/', '')
+        try:
+            tts = gTTS(
+                text=text,
+                lang=lang,
+                slow=False if self.voice_speed >= 1.0 else True
+            )
+            
+            filename = f"{self.audio_dir}/speech_{datetime.now().timestamp()}.mp3"
+            tts.save(filename)
+            
+            # Appliquer les modifications de voix
+            self._process_audio(filename)
+            
+            return filename.replace(self.audio_dir + '/', '')
+
+        except Exception as e:
+            print(f"Erreur dans text_to_speech amélioré: {e}")
+            return None
+
+    def _reduce_noise(self, audio_file):
+        try:
+            import numpy as np
+            from scipy.io import wavfile
+            from scipy import signal
+            
+            # Lecture du fichier audio
+            sample_rate, data = wavfile.read(audio_file)
+            
+            # Convertir en float32 pour le traitement
+            if data.dtype != np.float32:
+                data = data.astype(np.float32) / np.iinfo(data.dtype).max
+            
+            # Calcul de l'enveloppe du signal
+            envelope = np.abs(signal.hilbert(data))
+            
+            # Détection du niveau de bruit
+            noise_level = np.percentile(envelope, 10)
+            
+            # Vérifier si le signal est principalement du bruit
+            signal_strength = np.mean(envelope)
+            if signal_strength < self.min_signal_level or signal_strength < noise_level * 1.5:
+                print("Signal trop faible ou trop bruité")
+                return None
+            
+            # Application d'un filtre passe-bande pour la voix (80Hz-3000Hz)
+            nyquist = sample_rate / 2
+            low = 80 / nyquist
+            high = 3000 / nyquist
+            b, a = signal.butter(4, [low, high], btype='band')
+            filtered_data = signal.filtfilt(b, a, data)
+            
+            # Suppression du bruit
+            filtered_data[envelope < noise_level * 2] = 0
+            
+            # Normalisation
+            filtered_data = filtered_data / np.max(np.abs(filtered_data))
+            
+            # Sauvegarde du fichier filtré
+            temp_file = f"{self.temp_dir}/filtered_{datetime.now().timestamp()}.wav"
+            wavfile.write(temp_file, sample_rate, (filtered_data * 32767).astype(np.int16))
+            
+            return temp_file
+            
+        except Exception as e:
+            print(f"Erreur dans la réduction du bruit: {e}")
+            return audio_file
+
+    def _process_audio(self, filename):
+        try:
+            from pydub import AudioSegment
+            
+            audio = AudioSegment.from_mp3(filename)
+            
+            # Ajuster la vitesse
+            if self.voice_speed != 1.0:
+                audio = audio.speedup(playback_speed=self.voice_speed)
+            
+            # Ajuster le pitch (hauteur de la voix)
+            if self.voice_pitch != 1.0:
+                audio = audio._spawn(audio.raw_data, overrides={
+                    "frame_rate": int(audio.frame_rate * self.voice_pitch)
+                })
+            
+            # Sauvegarder les modifications
+            audio.export(filename, format="mp3")
+            
+        except Exception as e:
+            print(f"Erreur dans le traitement audio: {e}")
 
     def start_listening(self):
         self.is_listening = True
@@ -124,9 +210,9 @@ class VoiceHandler:
         try:
             print("Réception de données audio...")
             
-            # Vérifier si les données sont valides
             if not audio_data:
                 print("Données audio vides")
+                socketio.emit('error', {'message': 'Audio non détecté'})
                 return
 
             # Créer un fichier temporaire WAV
@@ -158,24 +244,64 @@ class VoiceHandler:
                         print("Audio trop court")
                         return
 
-                # Traiter l'audio
-                text = self.speech_to_text(temp_path)
+                # Vérification du niveau sonore avant traitement
+                with wave.open(temp_path, 'rb') as wf:
+                    frames = wf.readframes(wf.getnframes())
+                    audio_array = np.frombuffer(frames, dtype=np.int16)
+                    audio_array = audio_array.astype(np.float32) / 32768.0
+                    
+                    # Calcul du niveau sonore
+                    rms = np.sqrt(np.mean(np.square(audio_array)))
+                    if rms < self.noise_threshold:
+                        print("Niveau sonore trop faible")
+                        socketio.emit('error', {'message': 'Voix trop faible, parlez plus fort'})
+                        return
                 
-                if text.strip():
-                    print(f"Texte détecté: {text}")
-                    now = datetime.now()
-                    if now - self.last_transcription_time >= self.min_silence_duration:
-                        self.last_transcription_time = now
-                        socketio.emit('transcription', {'text': text})
-                        response = ai.process_input(text)
-                        if response:
+                # Réduction du bruit
+                filtered_path = self._reduce_noise(temp_path)
+                if filtered_path is None:
+                    print("Signal audio rejeté - trop de bruit")
+                    socketio.emit('error', {'message': 'Trop de bruit, essayez dans un environnement plus calme'})
+                    return
+                
+                # Traiter l'audio filtré
+                text = self.speech_to_text(filtered_path)
+                
+                if not text.strip():
+                    print("Aucun texte détecté")
+                    socketio.emit('error', {'message': 'Parole non détectée'})
+                    return
+                
+                print(f"Texte détecté: {text}")
+                now = datetime.now()
+                
+                if now - self.last_transcription_time >= self.min_silence_duration:
+                    self.last_transcription_time = now
+                    socketio.emit('transcription', {'text': text})
+                    
+                    response = ai.process_input(text)
+                    if response:
+                        try:
                             audio_path = self.text_to_speech(response)
+                            if audio_path:
+                                socketio.emit('response', {
+                                    'text': response,
+                                    'audio_path': audio_path,
+                                    'success': True
+                                })
+                            else:
+                                socketio.emit('response', {
+                                    'text': response,
+                                    'success': False,
+                                    'message': 'Erreur de synthèse vocale'
+                                })
+                        except Exception as e:
+                            print(f"Erreur de synthèse vocale: {e}")
                             socketio.emit('response', {
                                 'text': response,
-                                'audio_path': audio_path
+                                'success': False,
+                                'message': 'Erreur lors de la génération audio'
                             })
-                else:
-                    print("Aucun texte détecté")
 
             finally:
                 # Nettoyage
@@ -187,7 +313,10 @@ class VoiceHandler:
 
         except Exception as e:
             print(f"Erreur dans process_stream: {str(e)}")
-            socketio.emit('error', {'message': 'Erreur dans le traitement audio'})
+            socketio.emit('error', {
+                'message': 'Erreur dans le traitement audio',
+                'details': str(e)
+            })
 
 class LanguageModel:
     def __init__(self):
@@ -1141,24 +1270,44 @@ class SanAI:
         self.train_enhanced_model()
 
     def process_voice(self, audio_file):
-        """Traite l'entrée vocale et retourne une réponse audio"""
-        text = self.voice_handler.speech_to_text(audio_file)
-        print(f"Texte reconnu: {text}")  # Debug
-        
-        response = self.process_input(text)
-        
-        # Si pas de réponse (San n'est pas appelé), ne pas générer d'audio
-        if response is None:
+        """Traitement vocal amélioré"""
+        try:
+            # Prétraitement de l'audio
+            text = self.voice_handler.speech_to_text(audio_file)
+            print(f"Texte reconnu: {text}")
+            
+            if not text.strip():
+                return {
+                    "text": "Je n'ai pas bien compris, pourriez-vous répéter ?",
+                    "audio_file": self.voice_handler.text_to_speech(
+                        "Je n'ai pas bien compris, pourriez-vous répéter ?"
+                    )
+                }
+            
+            # Traitement de la requête
+            response = self.process_input(text)
+            
+            # Si l'assistant n'est pas appelé
+            if response is None:
+                return {
+                    "text": "",
+                    "audio_file": None
+                }
+            
+            # Génération de la réponse vocale
+            audio_response = self.voice_handler.text_to_speech(response)
+            
             return {
-                "text": "",
-                "audio_file": None
+                "text": response,
+                "audio_file": audio_response
             }
-        
-        audio_response = self.voice_handler.text_to_speech(response)
-        return {
-            "text": response,
-            "audio_file": audio_response
-        }
+
+        except Exception as e:
+            error_msg = "Désolé, une erreur s'est produite lors du traitement vocal."
+            return {
+                "text": error_msg,
+                "audio_file": self.voice_handler.text_to_speech(error_msg)
+            }
 
     def get_conversation_history(self):
         return self.conversation_history
@@ -1190,26 +1339,43 @@ def query():
 @app.route('/voice', methods=['POST'])
 def voice():
     if 'audio' not in request.files:
-        return jsonify({"error": "No audio file"}), 400
-    
-    audio_file = request.files['audio']
-    temp_file = tempfile.NamedTemporaryFile(delete=False)
-    audio_file.save(temp_file.name)
-    
-    result = ai.process_voice(temp_file.name)
-    os.unlink(temp_file.name)
-    
-    # Si pas de réponse, retourner un message vide
-    if result["audio_file"] is None:
         return jsonify({
-            "response": "",
+            "success": False,
+            "message": "Fichier audio manquant",
+            "response": None,
             "audio_path": None
-        })
+        }), 400
     
-    return jsonify({
-        "response": result["text"],
-        "audio_path": result["audio_file"]
-    })
+    try:
+        audio_file = request.files['audio']
+        temp_file = tempfile.NamedTemporaryFile(delete=False)
+        audio_file.save(temp_file.name)
+        
+        result = ai.process_voice(temp_file.name)
+        os.unlink(temp_file.name)
+        
+        if not result or not result.get("text"):
+            return jsonify({
+                "success": False,
+                "message": "Aucune parole détectée",
+                "response": None,
+                "audio_path": None
+            })
+        
+        return jsonify({
+            "success": True,
+            "response": result["text"],
+            "audio_path": result["audio_file"],
+            "message": "Traitement réussi"
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": f"Erreur: {str(e)}",
+            "response": None,
+            "audio_path": None
+        }), 500
 
 @app.route('/audio/<path:filename>')
 @app.route('/static/audio/<path:filename>')
