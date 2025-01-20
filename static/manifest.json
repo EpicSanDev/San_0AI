@@ -1,0 +1,16 @@
+
+{
+    "name": "San AI Assistant",
+    "short_name": "San AI",
+    "start_url": "/mobile",
+    "display": "standalone",
+    "background_color": "#ffffff",
+    "theme_color": "#007AFF",
+    "icons": [
+        {
+            "src": "/static/icon-192.png",
+            "sizes": "192x192",
+            "type": "image/png"
+        }
+    ]
+}
