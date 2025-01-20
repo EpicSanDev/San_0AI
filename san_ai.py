@@ -421,8 +421,8 @@ class LanguageModel:
                 'mps': {
                     'device_map': None,
                     'torch_dtype': torch.float16,
-                    'low_cpu_mem_usage': True,
-                    'use_metal': True
+                    'low_cpu_mem_usage': True
+                    # Retiré use_metal car non supporté
                 },
                 'cpu': {
                     'device_map': None,
@@ -473,12 +473,13 @@ class LanguageModel:
             model_info['tokenizer'] = AutoTokenizer.from_pretrained(model_info['name'])
             
             if self.is_m1:
-                params = self.model_params['mps']
+                params = {k: v for k, v in self.model_params['mps'].items() 
+                         if k not in ['device_map']}  # Retirer device_map pour M1
                 model = AutoModelForCausalLM.from_pretrained(
                     model_info['name'],
                     **params
                 )
-                model = model.to('mps')
+                model = model.to('mps')  # Déplacer vers MPS après l'initialisation
                 model_info['model'] = model
             else:
                 params = self.model_params[self.device]
@@ -548,7 +549,7 @@ class LanguageModel:
                 with torch.no_grad():
                     output = model.generate(
                         inputs["input_ids"].to('mps'),
-                        max_length=min(256, self.max_tokens),
+                        max_length=min(256, self.max_tokens),  # Limiter pour M1
                         min_length=5,
                         num_return_sequences=1,
                         temperature=0.7,
