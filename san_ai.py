@@ -1668,9 +1668,71 @@ class SanAI:
             # Mettre à jour le contexte
             self.context_manager.update_context(f"{speaker}: {text}", 
                                              self._generate_response_for_speaker(speaker))
+            
+            # Analyser le texte pour extraire des informations pertinentes
+            analysis = self.analyze_conversation(text, speaker)
+            
+            # Mettre à jour la base de connaissances du locuteur
+            self.update_speaker_knowledge(speaker, analysis)
+            
+            # Ajuster le modèle de langage pour ce locuteur
+            self.adapt_language_model(speaker, text)
+            
         else:
-            # ...existing code for normal learning...
-            pass
+            # Apprentissage standard sans identification du locuteur
+            importance = self.calculate_importance(text, "")
+            self.long_term_memory.add_memory(text, importance)
+            
+            # Mettre à jour le modèle d'apprentissage
+            self.update_training_data({text.lower(): [self._generate_response_for_speaker(None)]})
+            
+            # Réentraîner le modèle si nécessaire
+            if len(self.conversation_history) % 10 == 0:
+                self.train_enhanced_model()
+
+    def analyze_conversation(self, text, speaker):
+        """Analyse le contenu de la conversation pour en extraire des informations"""
+        analysis = {
+            'sentiment': self.analyze_sentiment(text),
+            'topics': self.context_manager.get_current_topic(),
+            'keywords': self.extract_keywords(text),
+            'timestamp': str(datetime.now())
+        }
+        return analysis
+
+    def update_speaker_knowledge(self, speaker, analysis):
+        """Met à jour la base de connaissances spécifique au locuteur"""
+        if not hasattr(self, 'speaker_knowledge'):
+            self.speaker_knowledge = defaultdict(dict)
+            
+        self.speaker_knowledge[speaker].update({
+            'last_interaction': analysis['timestamp'],
+            'topics': analysis['topics'],
+            'sentiment_history': self.speaker_knowledge[speaker].get('sentiment_history', []) + [analysis['sentiment']]
+        })
+
+    def adapt_language_model(self, speaker, text):
+        """Adapte le modèle de langage aux particularités du locuteur"""
+        if hasattr(self, 'speaker_knowledge') and speaker in self.speaker_knowledge:
+            # Utiliser l'historique des interactions pour affiner les réponses
+            history = self.speaker_knowledge[speaker]
+            
+            # Ajuster les paramètres du modèle selon les préférences du locuteur
+            if len(history.get('sentiment_history', [])) > 0:
+                avg_sentiment = sum(history['sentiment_history']) / len(history['sentiment_history'])
+                self.language_model.adjust_parameters(speaker, avg_sentiment)
+
+    def extract_keywords(self, text):
+        """Extrait les mots-clés importants du texte"""
+        # Utiliser TF-IDF pour identifier les mots importants
+        text_vector = self.vectorizer.transform([text])
+        feature_names = self.vectorizer.get_feature_names_out()
+        
+        # Obtenir les indices des mots les plus importants
+        important_words_idx = text_vector.toarray()[0].argsort()[-5:][::-1]
+        
+        # Retourner les mots-clés
+        return [feature_names[idx] for idx in important_words_idx]
 
     def _generate_response_for_speaker(self, speaker):
         """Génère une réponse adaptée au locuteur"""
