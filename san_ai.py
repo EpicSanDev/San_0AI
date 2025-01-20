@@ -15,13 +15,13 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 import pickle
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
-from sentence_transformers import SentenceTransformer
 import torch
 import random
 from transformers import pipeline
 from textblob import TextBlob
 import numpy as np
 from datetime import timedelta
+import wave
 import requests
 from datetime import datetime, timedelta
 import importlib.util
@@ -30,6 +30,7 @@ from collections import defaultdict
 import re
 from dateutil.parser import parse
 from datetime import datetime, timedelta
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 def parse_time(time_str):
     """Convertit une chaîne de temps en objet datetime"""
@@ -51,20 +52,61 @@ def parse_time(time_str):
 
 class VoiceHandler:
     def __init__(self):
-        self.model = whisper.load_model("base")
+        self.model = whisper.load_model("medium")  # Changer à medium pour plus de précision
         self.recognizer = sr.Recognizer()
         self.audio_queue = queue.Queue()
         self.is_listening = False
+        self.audio_dir = "static/audio"
+        # Créer le dossier audio s'il n'existe pas
+        if not os.path.exists(self.audio_dir):
+            os.makedirs(self.audio_dir)
+        self.last_transcription_time = datetime.now()
+        self.min_silence_duration = timedelta(seconds=1)  # Durée minimale de silence entre les phrases
+        self.temp_dir = tempfile.gettempdir()
+        self.sample_rate = 16000
+        self.channels = 1
+        self.min_audio_length = 0.5  # Durée minimale en secondes
+        self.energy_threshold = 1000  # Seuil de détection du son
+        self.recognizer.energy_threshold = self.energy_threshold
+        self.recognizer.dynamic_energy_threshold = True
 
     def speech_to_text(self, audio_file):
-        result = self.model.transcribe(audio_file)
-        return result["text"]
+        try:
+            # Ajout de logs pour le debug
+            print(f"Traitement du fichier audio: {audio_file}")
+            
+            # Vérifier si le fichier est valide
+            if not os.path.exists(audio_file):
+                print("Fichier audio introuvable")
+                return ""
+                
+            # Essayer d'utiliser Whisper
+            try:
+                result = self.model.transcribe(audio_file, language="fr")
+                text = result["text"].strip()
+                print(f"Whisper transcription: {text}")
+                return text
+            except Exception as e:
+                print(f"Erreur Whisper: {e}")
+                
+                # Fallback sur speech_recognition
+                with sr.AudioFile(audio_file) as source:
+                    audio = self.recognizer.record(source)
+                    text = self.recognizer.recognize_google(audio, language='fr-FR')
+                    print(f"Google transcription: {text}")
+                    return text
+                    
+        except Exception as e:
+            print(f"Erreur dans speech_to_text: {e}")
+            return ""
 
     def text_to_speech(self, text, lang='fr'):
         tts = gTTS(text=text, lang=lang)
-        temp_file = tempfile.NamedTemporaryFile(suffix='.mp3', delete=False)
-        tts.save(temp_file.name)
-        return temp_file.name
+        # Utiliser un nom de fichier basé sur un timestamp pour éviter les conflits
+        filename = f"{self.audio_dir}/speech_{datetime.now().timestamp()}.mp3"
+        tts.save(filename)
+        # Retourner le chemin relatif
+        return filename.replace(self.audio_dir + '/', '')
 
     def start_listening(self):
         self.is_listening = True
@@ -78,37 +120,174 @@ class VoiceHandler:
                 if text.strip():
                     socketio.emit('transcription', {'text': text})
 
-    def process_stream(self, audio_chunk):
-        self.audio_queue.put(audio_chunk)
+    def process_stream(self, audio_data):
+        try:
+            print("Réception de données audio...")
+            
+            # Vérifier si les données sont valides
+            if not audio_data:
+                print("Données audio vides")
+                return
+
+            # Créer un fichier temporaire WAV
+            temp_path = os.path.join(self.temp_dir, f'temp_{datetime.now().timestamp()}.wav')
+            
+            try:
+                # Decoder les données base64 si nécessaire
+                if isinstance(audio_data, str):
+                    if ',' in audio_data:
+                        audio_data = audio_data.split(',')[1]
+                    import base64
+                    audio_data = base64.b64decode(audio_data)
+
+                # Écrire le fichier WAV avec les bons paramètres
+                with wave.open(temp_path, 'wb') as wf:
+                    wf.setnchannels(self.channels)
+                    wf.setsampwidth(2)  # 16-bit
+                    wf.setframerate(self.sample_rate)
+                    wf.writeframes(audio_data)
+
+                print(f"Fichier temporaire créé: {temp_path}")
+                
+                # Vérifier la durée du fichier audio
+                with wave.open(temp_path, 'rb') as wf:
+                    duration = wf.getnframes() / float(wf.getframerate())
+                    print(f"Durée audio: {duration}s")
+                    
+                    if duration < self.min_audio_length:
+                        print("Audio trop court")
+                        return
+
+                # Traiter l'audio
+                text = self.speech_to_text(temp_path)
+                
+                if text.strip():
+                    print(f"Texte détecté: {text}")
+                    now = datetime.now()
+                    if now - self.last_transcription_time >= self.min_silence_duration:
+                        self.last_transcription_time = now
+                        socketio.emit('transcription', {'text': text})
+                        response = ai.process_input(text)
+                        if response:
+                            audio_path = self.text_to_speech(response)
+                            socketio.emit('response', {
+                                'text': response,
+                                'audio_path': audio_path
+                            })
+                else:
+                    print("Aucun texte détecté")
+
+            finally:
+                # Nettoyage
+                try:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                except Exception as e:
+                    print(f"Erreur lors du nettoyage: {e}")
+
+        except Exception as e:
+            print(f"Erreur dans process_stream: {str(e)}")
+            socketio.emit('error', {'message': 'Erreur dans le traitement audio'})
 
 class LanguageModel:
     def __init__(self):
-        self.model_name = "flaubert/flaubert-base-cased"
-        self.tokenizer = GPT2Tokenizer.from_pretrained(self.model_name)
-        self.model = GPT2LMHeadModel.from_pretrained(self.model_name)
-        self.embedding_model = SentenceTransformer('distiluse-base-multilingual-cased-v1')
-        self.context_window = 5
+        self.models = {
+            'small': {
+                'name': "asi/gpt-fr-cased-small",
+                'model': None,
+                'tokenizer': None
+            },
+            'large': {
+                'name': "bigscience/bloom-3b",  # Modèle large multilingue
+                'model': None,
+                'tokenizer': None
+            }
+        }
+        self.current_model = 'small'  # Modèle par défaut
+        self.device = self._get_device()
+        self._initialize_default_model()
+        
+    def _get_device(self):
+        """Détermine le meilleur device disponible pour le modèle"""
+        if torch.cuda.is_available():
+            return "cuda"
+        elif hasattr(torch, 'mps') and torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+
+    def _initialize_default_model(self):
+        try:
+            model_info = self.models[self.current_model]
+            model_info['tokenizer'] = AutoTokenizer.from_pretrained(model_info['name'])
+            model_info['model'] = AutoModelForCausalLM.from_pretrained(
+                model_info['name'],
+                device_map=None,  # Désactiver device_map auto
+                torch_dtype=torch.float32  # Utiliser float32 au lieu de float16
+            ).to(self.device)  # Déplacer explicitement vers le device
+        except Exception as e:
+            print(f"Erreur lors du chargement du modèle large: {e}")
+            # Fallback sur le petit modèle
+            self.current_model = 'small'
+            model_info = self.models['small']
+            model_info['tokenizer'] = GPT2Tokenizer.from_pretrained("gpt2")
+            model_info['model'] = GPT2LMHeadModel.from_pretrained("gpt2").to(self.device)
+
+    def switch_model(self, model_size):
+        """Change le modèle actif (small/large)"""
+        if model_size not in self.models:
+            return False
+            
+        if not self.models[model_size]['model']:
+            try:
+                model_info = self.models[model_size]
+                model_info['tokenizer'] = AutoTokenizer.from_pretrained(model_info['name'])
+                model_info['model'] = AutoModelForCausalLM.from_pretrained(
+                    model_info['name'],
+                    device_map=None,
+                    torch_dtype=torch.float32
+                ).to(self.device)
+            except Exception as e:
+                print(f"Erreur lors du chargement du modèle {model_size}: {e}")
+                return False
+                
+        self.current_model = model_size
+        return True
 
     def generate_response(self, prompt, context=None):
-        if context:
-            full_prompt = f"{context}\nQuestion: {prompt}\nRéponse:"
-        else:
-            full_prompt = f"Question: {prompt}\nRéponse:"
-            
-        inputs = self.tokenizer(full_prompt, return_tensors="pt", max_length=512, truncation=True)
-        output = self.model.generate(
-            inputs["input_ids"],
-            max_length=200,
-            num_return_sequences=1,
-            temperature=0.7,
-            top_k=50,
-            top_p=0.95,
-            do_sample=True
-        )
-        return self.tokenizer.decode(output[0], skip_special_tokens=True)
+        try:
+            model_info = self.models[self.current_model]
+            model = model_info['model']
+            tokenizer = model_info['tokenizer']
 
-    def get_embedding(self, text):
-        return self.embedding_model.encode(text)
+            if context:
+                full_prompt = f"{context}\nQuestion: {prompt}\nRéponse:"
+            else:
+                full_prompt = f"Question: {prompt}\nRéponse:"
+                
+            inputs = tokenizer(full_prompt, return_tensors="pt", max_length=512, truncation=True)
+            inputs = inputs.to(model.device)  # Déplacer sur le même device que le modèle
+
+            output = model.generate(
+                inputs["input_ids"],
+                max_length=self.max_tokens,
+                min_length=5,
+                num_return_sequences=1,
+                temperature=0.7,
+                top_k=50,
+                top_p=0.95,
+                repetition_penalty=self.repetition_penalty,
+                do_sample=True,
+                pad_token_id=tokenizer.eos_token_id,
+                no_repeat_ngram_size=3
+            )
+            
+            response = tokenizer.decode(output[0], skip_special_tokens=True)
+            response = response.replace(full_prompt, "").strip()
+            return response
+
+        except Exception as e:
+            print(f"Erreur lors de la génération de réponse: {e}")
+            return "Je suis désolé, je ne peux pas générer une réponse pour le moment."
 
 class KnowledgeBase:
     def __init__(self):
@@ -135,19 +314,21 @@ class KnowledgeBase:
             self.embeddings[question.lower()] = self.language_model.get_embedding(question)
 
     def find_similar_question(self, question, threshold=0.7):
-        if self.language_model:
-            query_embedding = self.language_model.get_embedding(question)
-            max_sim = -1
-            best_question = None
+        if not self.knowledge:
+            return None, 0
             
-            for q, emb in self.embeddings.items():
-                sim = cosine_similarity([query_embedding], [emb])[0][0]
-                if sim > max_sim and sim >= threshold:
-                    max_sim = sim
-                    best_question = q
-                    
+        questions = list(self.knowledge.keys())
+        self.vectorizer.fit(questions + [question])
+        question_vector = self.vectorizer.transform([question])
+        all_vectors = self.vectorizer.transform(questions)
+        
+        similarities = cosine_similarity(question_vector, all_vectors)[0]
+        max_sim = max(similarities)
+        if max_sim >= threshold:
+            best_question = questions[similarities.argmax()]
             return best_question, max_sim
-        return super().find_similar_question(question, threshold)
+            
+        return None, 0
 
 class TrainingData:
     def __init__(self):
@@ -230,6 +411,28 @@ class TrainingData:
                     "Je peux vous aider de plusieurs façons:\n- Répondre à vos questions\n- Apprendre de nouvelles choses\n- Converser avec vous\n- Mémoriser des informations",
                     "Voici mes principales fonctions:\n- Conversation naturelle\n- Apprentissage continu\n- Reconnaissance vocale\n- Mémorisation d'informations"
                 ]
+            },
+            "humor": {
+                "patterns": [
+                    "raconte une blague", "fais moi rire", "connais tu une blague",
+                    "dis quelque chose de drôle", "une histoire drôle"
+                ],
+                "responses": [
+                    "Pourquoi les plongeurs plongent-ils toujours en arrière ? Parce que sinon ils tombent dans le bateau !",
+                    "Que fait une fraise sur un cheval ? Tagada tagada !",
+                    "Quel est le comble pour un électricien ? Ne pas être au courant !"
+                ]
+            },
+            "motivation": {
+                "patterns": [
+                    "je suis fatigué", "j'ai besoin de motivation",
+                    "encourage moi", "donne moi de l'énergie"
+                ],
+                "responses": [
+                    "La persévérance est la clé du succès ! Continuez, vous êtes sur la bonne voie.",
+                    "Chaque petit pas vous rapproche de votre objectif. Vous pouvez le faire !",
+                    "La réussite appartient à ceux qui n'abandonnent jamais. Je crois en vous !"
+                ]
             }
         }
 
@@ -295,7 +498,7 @@ class LongTermMemory:
         if importance >= self.importance_threshold:
             self.memories['interactions'].append({
                 'content': interaction,
-                'timestamp': str(datetime.datetime.now()),
+                'timestamp': str(datetime.now()),
                 'importance': importance
             })
             self.save_memories()
@@ -436,10 +639,176 @@ class ExternalAPI:
                 return data
         return None
 
+class ContextManager:
+    def __init__(self):
+        self.context_window = 10
+        self.contexts = defaultdict(float)
+        self.topic_tracker = []
+        self.conversation_history = []
+        
+    def get_context(self):
+        """Retourne le contexte actuel sous forme de texte"""
+        if not self.conversation_history:
+            return ""
+            
+        # Prendre les N derniers échanges
+        recent_history = self.conversation_history[-self.context_window:]
+        
+        # Construire le contexte avec le sujet actuel
+        current_topic = self.topic_tracker[-1] if self.topic_tracker else "général"
+        context = f"Sujet actuel: {current_topic}\n\n"
+        
+        # Ajouter l'historique récent
+        context += "\n".join([
+            f"Utilisateur: {exchange['user']}\nAssistant: {exchange['response']}"
+            for exchange in recent_history
+        ])
+        
+        return context
+        
+    def update_context(self, user_input, response):
+        # Ajouter à l'historique
+        self.conversation_history.append({
+            'user': user_input,
+            'response': response,
+            'timestamp': str(datetime.now())
+        })
+        
+        # Limiter la taille de l'historique
+        if len(self.conversation_history) > self.context_window * 2:
+            self.conversation_history = self.conversation_history[-self.context_window:]
+            
+        # Extraire les mots clés
+        keywords = set(word.lower() for word in user_input.split() if len(word) > 3)
+        
+        # Mettre à jour les scores de contexte
+        for keyword in keywords:
+            self.contexts[keyword] += 1.0
+            
+        # Détecter le changement de sujet
+        current_topic = self._detect_topic(keywords)
+        self.topic_tracker.append(current_topic)
+        
+        # Garder seulement les N derniers sujets
+        if len(self.topic_tracker) > self.context_window:
+            self.topic_tracker.pop(0)
+
+    def get_current_topic(self):
+        """Retourne le sujet actuel de la conversation"""
+        return self.topic_tracker[-1] if self.topic_tracker else "général"
+            
+    def _detect_topic(self, keywords):
+        # Liste de sujets prédéfinis
+        topics = {
+            "tech": {"ordinateur", "logiciel", "programme", "application"},
+            "météo": {"temps", "pluie", "soleil", "température"},
+            "santé": {"santé", "maladie", "douleur", "médecin"},
+            # Ajouter d'autres sujets...
+        }
+        
+        # Trouver le sujet le plus proche
+        max_overlap = 0
+        current_topic = "général"
+        
+        for topic, topic_keywords in topics.items():
+            overlap = len(keywords & topic_keywords)
+            if overlap > max_overlap:
+                max_overlap = overlap
+                current_topic = topic
+                
+        return current_topic
+
+class EmotionManager(EmotionSystem):
+    def __init__(self):
+        super().__init__()
+        self.emotional_memory = []
+        self.empathy_level = 0.7
+        
+    def update_emotion(self, text, context=None):
+        # Analyse émotionnelle plus sophistiquée
+        base_emotion = super().update_emotion(text)
+        
+        # Ajouter le contexte à l'analyse
+        if context:
+            context_emotion = self._analyze_context(context)
+            base_emotion = self._blend_emotions(base_emotion, context_emotion)
+            
+        self.emotional_memory.append({
+            'emotion': base_emotion,
+            'timestamp': datetime.now(),
+            'text': text
+        })
+        
+        return base_emotion
+        
+    def _analyze_context(self, context):
+        # Analyser les émotions dans le contexte
+        return super().update_emotion(context)
+        
+    def _blend_emotions(self, emotion1, emotion2):
+        # Mélanger deux émotions avec des poids
+        return emotion1 if random.random() < self.empathy_level else emotion2
+
+class PrioritizedTaskManager(TaskManager):
+    def __init__(self):
+        super().__init__()
+        self.priority_levels = {
+            'haute': 3,
+            'moyenne': 2,
+            'basse': 1
+        }
+        
+    def add_task(self, description, deadline=None, priority='moyenne'):
+        task = {
+            'description': description,
+            'created': str(datetime.now()),
+            'deadline': deadline,
+            'completed': False,
+            'priority': self.priority_levels.get(priority, 1)
+        }
+        self.tasks.append(task)
+        self.tasks.sort(key=lambda x: (-x['priority'], x.get('deadline', 'inf')))
+        self.save_tasks()
+        return task
+
+class HumorDetector:
+    def __init__(self):
+        self.humor_keywords = {
+            "blague", "drôle", "rire", "mdr", "lol", "ptdr", "humour",
+            "joke", "amusant", "marrant", "rigoler", "rigolo"
+        }
+        self.joke_patterns = [
+            r"pourquoi .*\?",
+            r"que fait .*\?",
+            r"qu'est-ce qui .*\?"
+        ]
+    
+    def is_humor_request(self, text):
+        text_lower = text.lower()
+        # Vérifier les mots clés
+        if any(word in text_lower for word in self.humor_keywords):
+            return True
+        # Vérifier les patterns de blagues
+        return any(re.match(pattern, text_lower) for pattern in self.joke_patterns)
+
+class SpellChecker:
+    def __init__(self):
+        self.common_errors = {
+            "assisatnt": "assistant",
+            "ameloire": "améliorer",
+            "san ai": "San AI",
+            # Ajouter d'autres corrections courantes
+        }
+    
+    def correct(self, text):
+        for error, correction in self.common_errors.items():
+            text = text.replace(error, correction)
+        return text
+
 class SanAI:
     def __init__(self):
         self.name = "San"
-        self.creation_date = datetime.datetime.now()
+        self.creation_date = datetime.now()  # Modifié ici
         self.memory_file = "memory.json"
         self.load_memory()
         self.vectorizer = TfidfVectorizer()
@@ -457,12 +826,178 @@ class SanAI:
         self.emotion_system = EmotionSystem()
         self.personality = PersonalitySystem()
         self.long_term_memory = LongTermMemory()
-        self.last_learning_check = datetime.datetime.now()
+        self.last_learning_check = datetime.now()  # Modifié ici
         self.learning_interval = timedelta(hours=1)
         self.task_manager = TaskManager()
         self.rl = ReinforcementLearning()
         self.plugin_system = PluginSystem()
         self.external_api = ExternalAPI()
+        self.context_manager = ContextManager()
+        self.emotion_manager = EmotionManager()
+        self.task_manager = PrioritizedTaskManager()
+        self.activation_keywords = {"san", "sent", "sand", "son"}  # Mots similaires pour la reconnaissance vocale
+        self.humor_detector = HumorDetector()
+        self.spell_checker = SpellChecker()
+        self.jokes = [
+            "Pourquoi les plongeurs plongent-ils toujours en arrière ? Parce que sinon ils tombent dans le bateau !",
+            "Que fait une fraise sur un cheval ? Tagada tagada !",
+            "Quel est le comble pour un électricien ? Ne pas être au courant !",
+            # Ajouter d'autres blagues
+        ]
+
+    def is_activated(self, text):
+        """Vérifie si l'assistant est appelé dans le texte"""
+        words = set(text.lower().split())
+        return bool(words & self.activation_keywords)
+
+    def process_input(self, user_input):
+        user_input = user_input.lower()
+        
+        # Vérifier si l'assistant est appelé
+        if not self.is_activated(user_input):
+            return None  # Ne pas répondre si l'assistant n'est pas appelé
+            
+        # Nettoyer l'entrée en retirant le mot d'activation
+        cleaned_input = ' '.join(word for word in user_input.split() 
+                               if word not in self.activation_keywords)
+        
+        # Si l'entrée ne contient que le mot d'activation
+        if not cleaned_input.strip():
+            response = "Oui, je vous écoute ?"
+            self.conversation_history.append({
+                "user": user_input,
+                "assistant": response,
+                "timestamp": str(datetime.now())
+            })
+            return response
+
+        # Continuer avec le traitement normal avec l'entrée nettoyée
+        return self._process_input_internal(cleaned_input)
+
+    def _process_input_internal(self, user_input):
+        """Méthode interne pour traiter l'entrée une fois activée"""
+        self.conversation_history.append({"user": user_input, "timestamp": str(datetime.now())})
+        
+        # Correction orthographique
+        user_input = self.spell_checker.correct(user_input)
+        
+        # Vérifier si c'est une demande d'humour
+        if self.humor_detector.is_humor_request(user_input):
+            return random.choice(self.jokes)
+        
+        # Obtenir le contexte actuel avant l'analyse émotionnelle
+        context = self.get_context()
+        
+        # Vérifier d'abord si c'est une salutation simple
+        if user_input in self.training_data.categories["greeting"]["patterns"]:
+            response = random.choice(self.training_data.categories["greeting"]["responses"])
+            emotional_state = self.emotion_manager.update_emotion(user_input, context)
+            response = self.personality.adjust_response(response, emotional_state)
+            
+            self.conversation_history.append({
+                "user": user_input,
+                "assistant": response,
+                "timestamp": str(datetime.now())
+            })
+            return response
+            
+        # Le reste du code existant de process_input...
+        # Gestion du mode apprentissage
+        if user_input.startswith("apprends que"):
+            self.learning_mode = True
+            return "D'accord, quelle est la réponse que je dois donner à cette question?"
+
+        if self.learning_mode:
+            last_question = self.conversation_history[-2]["user"]
+            if last_question.startswith("apprends que"):
+                question = last_question[12:].strip()
+                answer = user_input
+                self.knowledge_base.add_knowledge(question, answer)
+                self.learning_mode = False
+                return f"Merci! J'ai appris que la réponse à '{question}' est '{answer}'"
+
+        # Recherche dans la base de connaissances
+        similar_q, confidence = self.knowledge_base.find_similar_question(user_input)
+        if similar_q and confidence > 0.7:
+            response = self.knowledge_base.knowledge[similar_q]
+            self.conversation_history.append({
+                "assistant": response,
+                "timestamp": str(datetime.now()),
+                "confidence": confidence
+            })
+            return response
+
+        # Classification et réponse
+        input_transformed = self.vectorizer.transform([user_input])
+        intent = self.classifier.predict(input_transformed)[0]
+        probas = self.classifier.predict_proba(input_transformed)[0]
+        max_proba = max(probas)
+
+        # Analyse des émotions et du sentiment
+        sentiment_analysis = self.analyze_sentiment(user_input)
+        sentiment = sentiment_analysis['sentiment']  # Extraire la valeur numérique du sentiment
+        emotional_state = self.emotion_manager.update_emotion(user_input, context)
+
+        # Gestion des tâches
+        if "rappelle-moi" in user_input:
+            match = re.search(r"rappelle-moi (.*?) (?:dans|à) (.*)", user_input)
+            if match:
+                message = match.group(1)
+                time_str = match.group(2)
+                # Conversion du temps en datetime
+                try:
+                    trigger_time = parse_time(time_str)
+                    self.task_manager.add_reminder(message, str(trigger_time))
+                    return f"Je vous rappellerai de {message} à {trigger_time.strftime('%H:%M')}"
+                except:
+                    return "Je n'ai pas compris le format du temps"
+
+        # Gestion de la météo
+        if "météo" in user_input or "temps" in user_input:
+            match = re.search(r"(?:météo|temps).*?(?:à|a|dans) ([\w\s]+)", user_input)
+            if match:
+                location = match.group(1)
+                weather_data = self.external_api.get_weather(location)
+                if weather_data:
+                    temp = weather_data['main']['temp']
+                    desc = weather_data['weather'][0]['description']
+                    return f"À {location}, il fait {temp}°C avec {desc}"
+
+        # Génération de la réponse
+        if max_proba > 0.4:
+            response = self.get_response_for_category(intent)
+        else:
+            # Utiliser le modèle de langage pour les réponses inconnues
+            context = self.get_context()
+            response = self.language_model.generate_response(user_input, context)
+
+        # Ajuster la réponse selon la personnalité et l'état émotionnel
+        response = self.personality.adjust_response(response, emotional_state)
+
+        # Mémorisation à long terme
+        importance = max(abs(sentiment), max_proba)
+        self.long_term_memory.add_memory(f"User: {user_input}\nAssistant: {response}", importance)
+
+        # Apprentissage par renforcement
+        self.rl.update_reward(response, 0.5)  # Récompense neutre par défaut
+
+        # Auto-apprentissage périodique
+        self.check_for_learning()
+
+        # Mise à jour du gestionnaire de contexte avec la nouvelle interaction
+        self.context_manager.update_context(user_input, response)
+
+        # Mise à jour du contexte
+        self.context_history.append({
+            "user": user_input,
+            "assistant": response
+        })
+        if len(self.context_history) > 10:
+            self.context_history.pop(0)
+
+        self.conversation_history.append({"assistant": response, "timestamp": str(datetime.now())})  # Modifié ici
+        self.save_memory()
+        return response
 
     def load_memory(self):
         if os.path.exists(self.memory_file):
@@ -516,121 +1051,61 @@ class SanAI:
         ])
 
     def get_response_for_category(self, category, **kwargs):
+        # Amélioration des réponses
         if category not in self.training_data.categories:
-            return "Je ne sais pas comment répondre à cela."
+            # Utiliser le modèle de langage pour générer une réponse appropriée
+            context = self.get_context()
+            return self.language_model.generate_response(f"Comment répondre à une question de type {category}?", context)
             
         responses = self.training_data.categories[category]["responses"]
         response = random.choice(responses)
         
-        if category == "time":
-            current_time = datetime.datetime.now().strftime("%H:%M")
-            response = response.format(time=current_time)
+        # Personnalisation de la réponse selon l'heure
+        current_hour = datetime.now().hour
+        if (current_hour < 6):
+            response = "En cette nuit tardive, " + response
+        elif (current_hour < 12):
+            response = "En cette belle matinée, " + response
+        elif (current_hour < 18):
+            response = "En cet après-midi, " + response
+        else:
+            response = "En cette soirée, " + response
             
         return response
 
     def analyze_sentiment(self, text):
+        # Amélioration de l'analyse des sentiments
         analysis = TextBlob(text)
-        return analysis.sentiment.polarity
-
-    def process_input(self, user_input):
-        user_input = user_input.lower()
-        self.conversation_history.append({"user": user_input, "timestamp": str(datetime.datetime.now())})
+        sentiment = analysis.sentiment.polarity
         
-        # Gestion du mode apprentissage
-        if user_input.startswith("apprends que"):
-            self.learning_mode = True
-            return "D'accord, quelle est la réponse que je dois donner à cette question?"
-
-        if self.learning_mode:
-            last_question = self.conversation_history[-2]["user"]
-            if last_question.startswith("apprends que"):
-                question = last_question[12:].strip()
-                answer = user_input
-                self.knowledge_base.add_knowledge(question, answer)
-                self.learning_mode = False
-                return f"Merci! J'ai appris que la réponse à '{question}' est '{answer}'"
-
-        # Recherche dans la base de connaissances
-        similar_q, confidence = self.knowledge_base.find_similar_question(user_input)
-        if similar_q and confidence > 0.7:
-            response = self.knowledge_base.knowledge[similar_q]
-            self.conversation_history.append({
-                "assistant": response,
-                "timestamp": str(datetime.datetime.now()),
-                "confidence": confidence
-            })
-            return response
-
-        # Classification et réponse
-        input_transformed = self.vectorizer.transform([user_input])
-        intent = self.classifier.predict(input_transformed)[0]
-        probas = self.classifier.predict_proba(input_transformed)[0]
-        max_proba = max(probas)
-
-        # Analyse des émotions et du sentiment
-        emotional_state = self.emotion_system.update_emotion(user_input)
-        sentiment = self.analyze_sentiment(user_input)
-
-        # Gestion des tâches
-        if "rappelle-moi" in user_input:
-            match = re.search(r"rappelle-moi (.*?) (?:dans|à) (.*)", user_input)
-            if match:
-                message = match.group(1)
-                time_str = match.group(2)
-                # Conversion du temps en datetime
-                try:
-                    trigger_time = parse_time(time_str)
-                    self.task_manager.add_reminder(message, str(trigger_time))
-                    return f"Je vous rappellerai de {message} à {trigger_time.strftime('%H:%M')}"
-                except:
-                    return "Je n'ai pas compris le format du temps"
-
-        # Gestion de la météo
-        if "météo" in user_input or "temps" in user_input:
-            match = re.search(r"(?:météo|temps).*?(?:à|a|dans) ([\w\s]+)", user_input)
-            if match:
-                location = match.group(1)
-                weather_data = self.external_api.get_weather(location)
-                if weather_data:
-                    temp = weather_data['main']['temp']
-                    desc = weather_data['weather'][0]['description']
-                    return f"À {location}, il fait {temp}°C avec {desc}"
-
-        # Génération de la réponse
-        if max_proba > 0.4:
-            response = self.get_response_for_category(intent)
-        else:
-            # Utiliser le modèle de langage pour les réponses inconnues
-            context = self.get_context()
-            response = self.language_model.generate_response(user_input, context)
-
-        # Ajuster la réponse selon la personnalité et l'état émotionnel
-        response = self.personality.adjust_response(response, emotional_state)
-
-        # Mémorisation à long terme
-        importance = max(abs(sentiment), max_proba)
-        self.long_term_memory.add_memory(f"User: {user_input}\nAssistant: {response}", importance)
-
-        # Apprentissage par renforcement
-        self.rl.update_reward(response, 0.5)  # Récompense neutre par défaut
-
-        # Auto-apprentissage périodique
-        self.check_for_learning()
-
-        # Mise à jour du contexte
-        self.context_history.append({
-            "user": user_input,
-            "assistant": response
-        })
-        if len(self.context_history) > 10:
-            self.context_history.pop(0)
-
-        self.conversation_history.append({"assistant": response, "timestamp": str(datetime.datetime.now())})
-        self.save_memory()
-        return response
+        # Ajout d'une analyse plus fine
+        emotions = {
+            'joie': 0,
+            'tristesse': 0,
+            'colère': 0,
+            'surprise': 0
+        }
+        
+        # Mots-clés pour chaque émotion
+        emotion_keywords = {
+            'joie': ['content', 'heureux', 'super', 'génial', 'excellent'],
+            'tristesse': ['triste', 'déçu', 'malheureux', 'dommage'],
+            'colère': ['énervé', 'fâché', 'agacé', 'furieux'],
+            'surprise': ['wow', 'incroyable', 'surprenant', 'étonnant']
+        }
+        
+        # Calculer le score pour chaque émotion
+        text_lower = text.lower()
+        for emotion, keywords in emotion_keywords.items():
+            emotions[emotion] = sum(1 for word in keywords if word in text_lower)
+            
+        return {
+            'sentiment': sentiment,
+            'emotions': emotions
+        }
 
     def check_for_learning(self):
-        now = datetime.datetime.now()
+        now = datetime.now()  # Modifié ici
         if now - self.last_learning_check > self.learning_interval:
             self.auto_learn()
             self.last_learning_check = now
@@ -666,8 +1141,19 @@ class SanAI:
         self.train_enhanced_model()
 
     def process_voice(self, audio_file):
+        """Traite l'entrée vocale et retourne une réponse audio"""
         text = self.voice_handler.speech_to_text(audio_file)
+        print(f"Texte reconnu: {text}")  # Debug
+        
         response = self.process_input(text)
+        
+        # Si pas de réponse (San n'est pas appelé), ne pas générer d'audio
+        if response is None:
+            return {
+                "text": "",
+                "audio_file": None
+            }
+        
         audio_response = self.voice_handler.text_to_speech(response)
         return {
             "text": response,
@@ -713,14 +1199,29 @@ def voice():
     result = ai.process_voice(temp_file.name)
     os.unlink(temp_file.name)
     
+    # Si pas de réponse, retourner un message vide
+    if result["audio_file"] is None:
+        return jsonify({
+            "response": "",
+            "audio_path": None
+        })
+    
     return jsonify({
         "response": result["text"],
         "audio_path": result["audio_file"]
     })
 
 @app.route('/audio/<path:filename>')
+@app.route('/static/audio/<path:filename>')
 def serve_audio(filename):
-    return send_file(filename, mimetype='audio/mp3')
+    if filename.startswith('static/audio/'):
+        return send_file(filename, mimetype='audio/mp3')
+    return send_file(f"static/audio/{filename}", mimetype='audio/mp3')
+
+@app.route('/mobile')
+def mobile():
+    """Route pour l'interface mobile"""
+    return render_template('mobile.html')
 
 @socketio.on('connect')
 def handle_connect():
@@ -729,12 +1230,18 @@ def handle_connect():
 
 @socketio.on('audio_stream')
 def handle_audio_stream(audio_data):
-    ai.voice_handler.process_stream(audio_data)
-    
+    try:
+        ai.voice_handler.process_stream(audio_data)
+    except Exception as e:
+        print(f"Erreur dans le traitement audio: {str(e)}")
+        # Émettre une erreur au client
+        socketio.emit('error', {'message': 'Erreur dans le traitement audio'})
+
 @socketio.on('disconnect')
 def handle_disconnect():
     print('Client disconnected')
     ai.voice_handler.is_listening = False
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, allow_unsafe_werkzeug=True)
+    # Retiré allow_unsafe_werkzeug car non supporté par eventlet
+    socketio.run(app, host='0.0.0.0', port=5050)
