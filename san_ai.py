@@ -92,12 +92,17 @@ class VoiceHandler:
         self.whisper_config = {
             'language': 'fr',
             'task': 'transcribe',
-            'temperature': 0.2,
-            'no_speech_threshold': 0.3,  # Plus sensible
-            'logprob_threshold': -1.0,
+            'temperature': 0.3,  # Réduit pour plus de stabilité
+            'no_speech_threshold': 0.1,  # Plus permissif
+            'logprob_threshold': -1.5,  # Plus permissif
             'condition_on_previous_text': True,
-            'best_of': 3  # Prend la meilleure parmi 3 tentatives
+            'best_of': 5,  # Augmenté pour plus de tentatives
+            'compression_ratio_threshold': 2.4,  # Plus permissif
+            'initial_prompt': "Bonjour, comment allez-vous?"  # Contexte initial en français
         }
+        
+        self.supported_formats = ['.wav', '.mp3', '.ogg', '.flac']
+        self.ffmpeg_path = self._get_ffmpeg_path()
         
         try:
             # Test du microphone
@@ -110,51 +115,150 @@ class VoiceHandler:
             for index, name in enumerate(sr.Microphone.list_microphone_names()):
                 print(f"Microphone {index}: {name}")
 
+    def _get_ffmpeg_path(self):
+        """Get FFmpeg path from system"""
+        try:
+            import shutil
+            return shutil.which('ffmpeg')
+        except Exception:
+            return 'ffmpeg'  # Default to system path
+
+    def _validate_audio_file(self, audio_file):
+        """Validate audio file format and existence"""
+        if not os.path.exists(audio_file):
+            raise FileNotFoundError(f"File not found: {audio_file}")
+            
+        ext = os.path.splitext(audio_file)[1].lower()
+        if ext not in self.supported_formats:
+            raise ValueError(f"Unsupported audio format: {ext}")
+            
+        if os.path.getsize(audio_file) < 100:  # Min 100 bytes
+            raise ValueError("Audio file is too small or empty")
+            
+        return True
+
+    def _convert_to_wav(self, audio_file):
+        """Convert audio to WAV format"""
+        try:
+            output_file = f"{self.temp_dir}/converted_{datetime.now().timestamp()}.wav"
+            
+            cmd = [
+                self.ffmpeg_path,
+                '-i', audio_file,
+                '-acodec', 'pcm_s16le',
+                '-ac', '1',
+                '-ar', '16000',
+                output_file
+            ]
+            
+            import subprocess
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                print(f"FFmpeg conversion error: {result.stderr}")
+                return None
+                
+            return output_file
+            
+        except Exception as e:
+            print(f"Audio conversion error: {e}")
+            return None
+
     def speech_to_text(self, audio_file):
         try:
             print("Début de la transcription...")
             
-            # Vérification du fichier audio
-            if not os.path.exists(audio_file):
-                raise FileNotFoundError(f"Fichier audio non trouvé: {audio_file}")
+            # Stocker la référence au fichier audio original
+            original_audio_file = audio_file
             
-            # Vérification de la taille du fichier
-            if os.path.getsize(audio_file) < 100:  # Taille minimale en octets
-                raise ValueError("Fichier audio trop petit ou corrompu")
-            
-            # Application de la réduction de bruit
+            # Validate audio file
+            try:
+                self._validate_audio_file(audio_file)
+            except Exception as e:
+                print(f"Audio validation error: {e}")
+                return ""
+
+            # Convert to WAV if needed
+            if not audio_file.lower().endswith('.wav'):
+                converted_file = self._convert_to_wav(audio_file)
+                if converted_file:
+                    audio_file = converted_file
+
+            # Apply noise reduction
             if self.noise_reduction:
                 filtered_file = self._reduce_noise(audio_file)
                 if filtered_file:
                     audio_file = filtered_file
-                    
-            print("Traitement de l'audio avec Whisper...")
-            result = self.model.transcribe(
-                audio_file,
-                **self.whisper_config
-            )
-            
-            text = result["text"].strip()
-            confidence = result.get("confidence", 0)
-            
-            print(f"Texte reconnu: '{text}' (confiance: {confidence:.2f})")
-            
-            # Validation du résultat
-            if not text or confidence < 0.5:
-                print("Confiance trop faible, nouvelle tentative...")
-                # Deuxième tentative avec des paramètres plus permissifs
-                self.whisper_config['temperature'] = 0.4
-                result = self.model.transcribe(audio_file, **self.whisper_config)
+
+            try:
+                print("Traitement de l'audio avec Whisper...")
+                result = self.model.transcribe(
+                    audio_file,
+                    **self.whisper_config
+                )
+                
                 text = result["text"].strip()
-                self.whisper_config['temperature'] = 0.2  # Retour aux paramètres normaux
-            
-            return text
+                confidence = result.get("confidence", 0)
+                
+                print(f"Texte reconnu: '{text}' (confiance: {confidence:.2f})")
+                
+                # Validation du résultat modifiée
+                if not text or confidence < 0.3:  # Seuil de confiance réduit
+                    print("Confiance trop faible, nouvelle tentative...")
+                    # Deuxième tentative avec des paramètres plus permissifs
+                    temp_config = self.whisper_config.copy()
+                    temp_config.update({
+                        'temperature': 0.5,
+                        'no_speech_threshold': 0.05,
+                        'best_of': 3
+                    })
+                    result = self.model.transcribe(audio_file, **temp_config)
+                    text = result["text"].strip()
+                    
+                # Post-traitement du texte
+                text = self._clean_transcription(text)
+                
+                return text
+
+            except Exception as e:
+                print(f"Whisper transcription error: {e}")
+                return ""
+                
+            finally:
+                # Cleanup temporary files
+                if audio_file != original_audio_file:
+                    try:
+                        os.remove(audio_file)
+                    except:
+                        pass
 
         except Exception as e:
-            print(f"Erreur détaillée dans speech_to_text: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            print(f"Speech to text error: {e}")
             return ""
+
+    def _clean_transcription(self, text):
+        """Nettoie et normalise la transcription"""
+        # Corrections courantes en français
+        common_fixes = {
+            'slt': 'salut',
+            'bjr': 'bonjour',
+            'bsr': 'bonsoir',
+            'stp': 's\'il te plaît',
+            'svp': 's\'il vous plaît'
+        }
+        
+        words = text.lower().split()
+        cleaned_words = [common_fixes.get(word, word) for word in words]
+        text = ' '.join(cleaned_words)
+        
+        # Capitalisation de la première lettre
+        text = text.capitalize()
+        
+        # Ajout de la ponctuation si manquante
+        if text and not text[-1] in '.!?':
+            text += '.'
+            
+        return text
 
     def text_to_speech(self, text, lang='fr'):
         try:
