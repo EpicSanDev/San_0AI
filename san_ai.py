@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, render_template, send_file
 from flask_socketio import SocketIO, emit
-from voice_profile_manager import VoiceProfileManager  # Ajout de l'import
+from voice_profile_manager import VoiceProfileManager
+from memory_assistant import MemoryAssistant  # Ajout de l'import manquant
 import queue
 import threading
 import whisper
@@ -1053,16 +1054,86 @@ class DialogueManager:
         return random.choice(self.fallback_responses)
 
     def _handle_question(self, question, context):
-        # Logique pour répondre aux questions
-        pass
+        """Gère les questions de l'utilisateur"""
+        try:
+            # Extraire les mots clés de la question
+            keywords = set(word.lower() for word in question.split() if len(word) > 3)
+
+            # Rechercher dans la base de connaissances
+            match = self.knowledge_base.find_similar_question(question)
+            if match:
+                return match
+
+            # Analyser le type de question
+            if any(w in question.lower() for w in ['quoi', 'que', 'qu']):
+                return self._handle_what_question(question, keywords)
+            elif any(w in question.lower() for w in ['comment', 'combien']):
+                return self._handle_how_question(question, keywords)
+            elif any(w in question.lower() for w in ['pourquoi', 'pour quoi']):
+                return self._handle_why_question(question, keywords)
+            else:
+                # Utiliser le modèle de langage pour générer une réponse
+                return self.language_model.generate_response(question, context)
+
+        except Exception as e:
+            print(f"Erreur dans _handle_question: {e}")
+            return "Je suis désolé, je ne comprends pas bien votre question. Pourriez-vous la reformuler ?"
 
     def _handle_request(self, request, context):
-        # Logique pour gérer les requêtes
-        pass
+        """Gère les demandes et requêtes de l'utilisateur"""
+        try:
+            request_lower = request.lower()
+            
+            # Vérifier les demandes de rappel
+            if 'rappelle' in request_lower or 'rappel' in request_lower:
+                return self._handle_reminder_request(request)
+                
+            # Vérifier les demandes d'aide
+            elif 'aide' in request_lower or 'help' in request_lower:
+                return self._handle_help_request(request)
+                
+            # Vérifier les demandes d'information
+            elif any(word in request_lower for word in ['explique', 'montre', 'dis']):
+                return self._handle_info_request(request, context)
+                
+            else:
+                # Utiliser le modèle de langage pour des requêtes générales
+                response = self.language_model.generate_response(request, context)
+                # Ajouter un indicateur d'action
+                return f"Je vais vous aider avec ça. {response}"
+
+        except Exception as e:
+            print(f"Erreur dans _handle_request: {e}")
+            return "Je ne peux pas traiter cette requête pour le moment."
 
     def _handle_statement(self, statement, context):
-        # Logique pour répondre aux affirmations
-        pass
+        """Gère les affirmations de l'utilisateur"""
+        try:
+            # Analyser le sentiment
+            sentiment = self.analyze_sentiment(statement)['sentiment']
+            
+            # Classer le type d'affirmation
+            if sentiment > 0.3:
+                return self._handle_positive_statement(statement)
+            elif sentiment < -0.3:
+                return self._handle_negative_statement(statement)
+            else:
+                # Pour les affirmations neutres, essayer de continuer la conversation
+                response = self.language_model.generate_response(statement, context)
+                
+                # Mémoriser l'information si pertinente
+                if len(statement.split()) > 3:  # Éviter les affirmations trop courtes
+                    self.memory_assistant.store_memory(
+                        content=statement,
+                        category="statements",
+                        importance=0.5
+                    )
+                    
+                return response
+
+        except Exception as e:
+            print(f"Erreur dans _handle_statement: {e}")
+            return "Je comprends. Pouvez-vous m'en dire plus?"
 
 class ConversationScenario:
     def __init__(self):
@@ -1234,6 +1305,16 @@ class SanAI:
         self.conversation_stats = ConversationStats()
         self.voice_profile_manager = VoiceProfileManager()
         self.pending_voice_identification = {}
+        self.memory_assistant = MemoryAssistant()
+        self.continuous_listening = False
+        self.memory_keywords = {
+            'important': ['important', 'crucial', 'essentiel', 'urgent'],
+            'routine': ['toujours', 'habitude', 'quotidien', 'routine'],
+            'people': ['avec', 'rencontré', 'vu', 'parlé'],
+            'location': ['à', 'chez', 'dans', 'au', 'en']
+        }
+        from memory_manager import MemoryManager
+        self.memory_manager = MemoryManager()
 
     def is_activated(self, text):
         """Vérifie si l'assistant est appelé dans le texte"""
@@ -1241,153 +1322,150 @@ class SanAI:
         return bool(words & self.activation_keywords)
 
     def process_input(self, user_input):
-        user_input = user_input.lower()
-        
-        # Vérifier si l'assistant est appelé
-        if not self.is_activated(user_input):
-            return None  # Ne pas répondre si l'assistant n'est pas appelé
+        try:
+            # Correction orthographique et nettoyage
+            cleaned_input = self.spell_checker.correct(user_input.strip())
             
-        # Nettoyer l'entrée en retirant le mot d'activation
-        cleaned_input = ' '.join(word for word in user_input.split() 
-                               if word not in self.activation_keywords)
-        
-        # Si l'entrée ne contient que le mot d'activation
-        if not cleaned_input.strip():
-            response = "Oui, je vous écoute ?"
-            self.conversation_history.append({
-                "user": user_input,
-                "assistant": response,
-                "timestamp": str(datetime.now())
-            })
-            return response
+            # Vérifier l'activation
+            if not self.is_activated(cleaned_input):
+                return None
 
-        # Continuer avec le traitement normal avec l'entrée nettoyée
-        return self._process_input_internal(cleaned_input)
-
-    def _process_input_internal(self, user_input):
-        """Méthode interne pour traiter l'entrée une fois activée"""
-        self.conversation_history.append({"user": user_input, "timestamp": str(datetime.now())})
-        
-        # Correction orthographique
-        user_input = self.spell_checker.correct(user_input)
-        
-        # Vérifier si c'est une demande d'humour
-        if self.humor_detector.is_humor_request(user_input):
-            return random.choice(self.jokes)
-        
-        # Obtenir le contexte actuel avant l'analyse émotionnelle
-        context = self.get_context()
-        
-        # Vérifier d'abord si c'est une salutation simple
-        if user_input in self.training_data.categories["greeting"]["patterns"]:
-            response = random.choice(self.training_data.categories["greeting"]["responses"])
-            emotional_state = self.emotion_manager.update_emotion(user_input, context)
-            response = self.personality.adjust_response(response, emotional_state)
+            # Extraire le contexte actuel
+            current_context = self.context_manager.get_context()
             
-            self.conversation_history.append({
-                "user": user_input,
-                "assistant": response,
-                "timestamp": str(datetime.now())
-            })
+            # Identifier le locuteur si disponible
+            speaker = self.voice_profile_manager.get_current_speaker()
+            
+            # Analyser l'intention et le contexte
+            intent = self._analyze_intent(cleaned_input)
+            
+            # Traiter les commandes spéciales
+            if intent.get('type') == 'command':
+                return self._handle_command(intent, cleaned_input)
+            
+            # Générer la réponse
+            response = self._generate_response(cleaned_input, current_context, speaker)
+            
+            # Mémoriser l'interaction
+            self._store_interaction(cleaned_input, response, speaker)
+            
+            # Mettre à jour le contexte
+            self.context_manager.update_context(cleaned_input, response)
+            
             return response
             
-        # Le reste du code existant de process_input...
-        # Gestion du mode apprentissage
-        if user_input.startswith("apprends que"):
-            self.learning_mode = True
-            return "D'accord, quelle est la réponse que je dois donner à cette question?"
+        except Exception as e:
+            print(f"Erreur dans process_input: {e}")
+            return "Je suis désolé, j'ai rencontré une erreur lors du traitement de votre demande."
 
-        if self.learning_mode:
-            last_question = self.conversation_history[-2]["user"]
-            if last_question.startswith("apprends que"):
-                question = last_question[12:].strip()
-                answer = user_input
-                self.knowledge_base.add_knowledge(question, answer)
-                self.learning_mode = False
-                return f"Merci! J'ai appris que la réponse à '{question}' est '{answer}'"
+    def _analyze_intent(self, text):
+        """Analyse l'intention de l'utilisateur"""
+        # Détecter les commandes
+        if text.startswith(('rappelle', 'ajoute', 'note')):
+            return {'type': 'command', 'action': 'task'}
+            
+        # Détecter les questions
+        if any(q in text.lower() for q in ['quoi', 'comment', 'pourquoi', 'quand', 'où']):
+            return {'type': 'question'}
+            
+        return {'type': 'statement'}
 
-        # Recherche dans la base de connaissances
-        similar_q, confidence = self.knowledge_base.find_similar_question(user_input)
-        if similar_q and confidence > 0.7:
-            response = self.knowledge_base.knowledge[similar_q]
-            self.conversation_history.append({
-                "assistant": response,
-                "timestamp": str(datetime.now()),
-                "confidence": confidence
-            })
-            return response
+    def _handle_command(self, intent, text):
+        """Gère les commandes spéciales"""
+        if intent.get('action') == 'task':
+            return self._handle_task_command(text)
+        return None
 
-        # Classification et réponse
-        input_transformed = self.vectorizer.transform([user_input])
-        intent = self.classifier.predict(input_transformed)[0]
-        probas = self.classifier.predict_proba(input_transformed)[0]
-        max_proba = max(probas)
-
-        # Analyse des émotions et du sentiment
-        sentiment_analysis = self.analyze_sentiment(user_input)
-        sentiment = sentiment_analysis['sentiment']  # Extraire la valeur numérique du sentiment
-        emotional_state = self.emotion_manager.update_emotion(user_input, context)
-
-        # Gestion des tâches
-        if "rappelle-moi" in user_input:
-            match = re.search(r"rappelle-moi (.*?) (?:dans|à) (.*)", user_input)
-            if match:
-                message = match.group(1)
-                time_str = match.group(2)
-                # Conversion du temps en datetime
+    def _handle_task_command(self, text):
+        """Gère les commandes de tâches et rappels"""
+        try:
+            # Extraire la date/heure si présente
+            time_match = re.search(r"(?:à|dans|pour) ([\w\s]+)", text)
+            task_time = None
+            if time_match:
                 try:
-                    trigger_time = parse_time(time_str)
-                    self.task_manager.add_reminder(message, str(trigger_time))
-                    return f"Je vous rappellerai de {message} à {trigger_time.strftime('%H:%M')}"
+                    task_time = parse_time(time_match.group(1))
                 except:
-                    return "Je n'ai pas compris le format du temps"
+                    pass
 
-        # Gestion de la météo
-        if "météo" in user_input or "temps" in user_input:
-            match = re.search(r"(?:météo|temps).*?(?:à|a|dans) ([\w\s]+)", user_input)
-            if match:
-                location = match.group(1)
-                weather_data = self.external_api.get_weather(location)
-                if weather_data:
-                    temp = weather_data['main']['temp']
-                    desc = weather_data['weather'][0]['description']
-                    return f"À {location}, il fait {temp}°C avec {desc}"
+            # Extraire la description de la tâche
+            task_desc = re.sub(r"rappelle(?:-moi)? |ajoute |note |(?:à|dans|pour) [\w\s]+", "", text).strip()
 
-        # Génération de la réponse
-        if max_proba > 0.4:
-            response = self.get_response_for_category(intent)
-        else:
-            # Utiliser le modèle de langage pour les réponses inconnues
-            context = self.get_context()
-            response = self.language_model.generate_response(user_input, context)
+            # Ajouter la tâche
+            if task_time:
+                self.task_manager.add_reminder(task_desc, str(task_time))
+                return f"D'accord, je vous rappellerai de {task_desc} à {task_time.strftime('%H:%M le %d/%m/%Y')}"
+            else:
+                self.task_manager.add_task(task_desc)
+                return f"J'ai ajouté la tâche : {task_desc}"
 
-        # Ajuster la réponse selon la personnalité et l'état émotionnel
-        response = self.personality.adjust_response(response, emotional_state)
+        except Exception as e:
+            print(f"Erreur dans _handle_task_command: {e}")
+            return "Je n'ai pas pu traiter cette commande. Pourriez-vous la reformuler ?"
 
-        # Mémorisation à long terme
-        importance = max(abs(sentiment), max_proba)
-        self.long_term_memory.add_memory(f"User: {user_input}\nAssistant: {response}", importance)
-
-        # Apprentissage par renforcement
-        self.rl.update_reward(response, 0.5)  # Récompense neutre par défaut
-
-        # Auto-apprentissage périodique
-        self.check_for_learning()
-
-        # Mise à jour du gestionnaire de contexte avec la nouvelle interaction
-        self.context_manager.update_context(user_input, response)
-
-        # Mise à jour du contexte
-        self.context_history.append({
-            "user": user_input,
-            "assistant": response
-        })
-        if len(self.context_history) > 10:
-            self.context_history.pop(0)
-
-        self.conversation_history.append({"assistant": response, "timestamp": str(datetime.now())})  # Modifié ici
-        self.save_memory()
+    def _generate_response(self, input_text, context, speaker=None):
+        """Génère une réponse contextuelle"""
+        # Chercher dans la mémoire
+        memory_response = self.memory_manager.find_relevant_memory(input_text)
+        
+        if memory_response and memory_response.get('confidence', 0) > self.confidence_threshold:
+            return memory_response['content']
+            
+        # Utiliser le modèle de langage
+        response = self.language_model.generate_response(input_text, context)
+        
+        # Personnaliser pour le locuteur
+        if speaker:
+            response = self._personalize_response(response, speaker)
+            
         return response
+
+    def _store_interaction(self, input_text, response, speaker=None):
+        """Stocke l'interaction dans la mémoire"""
+        # Calculer l'importance
+        importance = self._calculate_importance(input_text)
+        
+        # Stocker dans la mémoire à long terme
+        self.memory_manager.add_memory(
+            content=f"User: {input_text}\nAssistant: {response}",
+            category="conversation",
+            importance=importance,
+            speaker=speaker
+        )
+        
+        # Mettre à jour les statistiques d'apprentissage
+        self.conversation_stats.log_interaction(
+            topic=self.context_manager.get_current_topic(),
+            response_time=0.1  # À remplacer par le temps réel
+        )
+
+    def _personalize_response(self, response, speaker):
+        """Personnalise la réponse en fonction du locuteur"""
+        # Obtenir les préférences du locuteur
+        speaker_prefs = self.voice_profile_manager.get_profile_info(speaker)
+        
+        if not speaker_prefs:
+            return response
+            
+        # Adapter le ton et le style
+        if speaker_prefs.get('formal', False):
+            response = response.replace('tu', 'vous')
+            
+        # Ajouter des références personnelles
+        if 'name' in speaker_prefs:
+            response = f"{speaker_prefs['name']}, {response}"
+            
+        return response
+
+    def _calculate_importance(self, text):
+        """Calcule l'importance d'une interaction"""
+        factors = {
+            'length': min(1.0, len(text) / 100),
+            'question': 0.8 if '?' in text else 0.5,
+            'command': 0.9 if text.startswith(('rappelle', 'ajoute', 'note')) else 0.5,
+            'keywords': sum(1 for word in self.memory_keywords.values() if word in text.lower()) * 0.1
+        }
+        return min(1.0, sum(factors.values()) / len(factors))
 
     def load_memory(self):
         if os.path.exists(self.memory_file):
@@ -1651,7 +1729,7 @@ class SanAI:
     def add_speaker_identity(self, name, audio_file):
         """Ajoute l'identité d'un locuteur"""
         if self.voice_profile_manager.add_voice_profile(name, audio_file):
-            if audio_file in self.pending_voice_identification:
+            if (audio_file in self.pending_voice_identification):
                 text = self.pending_voice_identification[audio_file]
                 self.learn_from_conversation(text, name)
                 del self.pending_voice_identification[audio_file]
@@ -1741,6 +1819,85 @@ class SanAI:
         if speaker_memories:
             context += f"Précédentes interactions: {speaker_memories[-3:]}"
         return self.language_model.generate_response(context)
+
+    def process_continuous_input(self, text):
+        """Traite les entrées du mode d'écoute continue"""
+        # Calculer l'importance du souvenir
+        importance = self._calculate_memory_importance(text)
+        
+        # Extraire le contexte
+        category = self._categorize_memory(text)
+        location = self._extract_location(text)
+        people = self._extract_people(text)
+        
+        # Stocker le souvenir
+        self.memory_assistant.store_memory(
+            content=text,
+            category=category,
+            importance=importance,
+            location=location,
+            people=people,
+            context=self.context_manager.get_context()
+        )
+
+        # Générer une confirmation
+        confirmation = self._generate_memory_confirmation(text, category)
+        return confirmation
+
+    def _calculate_memory_importance(self, text):
+        """Calcule l'importance d'un souvenir basé sur des mots-clés"""
+        importance = 0.5  # Importance par défaut
+        text_lower = text.lower()
+        
+        # Augmenter l'importance pour les mots-clés importants
+        for word in self.memory_keywords['important']:
+            if word in text_lower:
+                importance += 0.1
+
+        # Analyser le sentiment pour ajuster l'importance
+        sentiment = self.analyze_sentiment(text)['sentiment']
+        importance += abs(sentiment) * 0.2
+        
+        return min(1.0, importance)
+
+    def _categorize_memory(self, text):
+        """Catégorise un souvenir"""
+        text_lower = text.lower()
+        categories = {
+            'rendez-vous': ['rendez-vous', 'rencontre', 'réunion'],
+            'tâche': ['faire', 'tâche', 'objectif'],
+            'conversation': ['parlé', 'dit', 'discuté'],
+            'événement': ['passé', 'arrivé', 'événement']
+        }
+        
+        for category, keywords in categories.items():
+            if any(keyword in text_lower for keyword in keywords):
+                return category
+        return 'général'
+
+    def get_memory_summary(self, period="aujourd'hui"):
+        """Génère un résumé des souvenirs"""
+        if period == "aujourd'hui":
+            summary = self.memory_assistant.get_daily_summary()
+            response = "Voici le résumé de votre journée :\n\n"
+            
+            for category, memories in summary.items():
+                response += f"\n{category.title()} :\n"
+                for memory in sorted(memories, key=lambda x: x['importance'], reverse=True):
+                    response += f"- {memory['content']}\n"
+            
+            return response
+        return "Je ne peux générer un résumé que pour aujourd'hui pour le moment."
+
+    def find_memory(self, query):
+        """Recherche dans les souvenirs"""
+        memories = self.memory_assistant.find_related_memories(query)
+        if memories:
+            response = "Voici ce que j'ai trouvé dans vos souvenirs :\n\n"
+            for i, memory in enumerate(memories, 1):
+                response += f"{i}. {memory}\n"
+            return response
+        return "Je n'ai pas trouvé de souvenirs correspondant à votre recherche."
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", ping_timeout=60)

@@ -1,141 +1,258 @@
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+import sqlite3
+import networkx as nx
 
 class MemoryManager:
     def __init__(self):
-        self.memory_file = "enhanced_memory.json"
-        self.memories = self.load_memories()
+        self.db_path = "enhanced_memories.db"
+        self.init_database()
         self.vectorizer = TfidfVectorizer()
-        self.memory_vectors = {}
-        self.importance_threshold = 0.7
-        self.max_memories = 1000
-        self.memory_categories = {
-            'conversations': [],
-            'facts': [],
-            'user_preferences': defaultdict(dict),
-            'learned_topics': defaultdict(list)
+        self.memory_graph = nx.Graph()
+        self.categories = {
+            'daily_routine': ['matin', 'midi', 'soir', 'repas', 'médicaments'],
+            'appointments': ['rendez-vous', 'médecin', 'réunion', 'important'],
+            'events': ['anniversaire', 'fête', 'sortie', 'visite'],
+            'tasks': ['tâche', 'courses', 'ménage', 'urgent'],
+            'interactions': ['conversation', 'appel', 'message', 'rencontre'],
+            'health': ['symptôme', 'traitement', 'médication', 'douleur'],
+            'locations': ['lieu', 'adresse', 'endroit', 'destination']
         }
         
-    def load_memories(self):
-        if os.path.exists(self.memory_file):
-            with open(self.memory_file, 'r') as f:
-                return json.load(f)
-        return {"short_term": [], "long_term": [], "permanent": []}
-
-    def save_memories(self):
-        with open(self.memory_file, 'w') as f:
-            json.dump(self.memories, f, indent=2)
-
-    def add_memory(self, content, category='conversations', importance=0.5):
-        memory = {
-            'content': content,
-            'timestamp': str(datetime.now()),
-            'importance': importance,
-            'category': category,
-            'access_count': 0,
-            'last_accessed': str(datetime.now())
-        }
+    def init_database(self):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
         
-        # Déterminer le stockage basé sur l'importance
-        if importance >= self.importance_threshold:
-            self.memories['long_term'].append(memory)
-        else:
-            self.memories['short_term'].append(memory)
+        # Table principale des souvenirs
+        c.execute('''CREATE TABLE IF NOT EXISTS memories
+                    (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     timestamp TEXT,
+                     content TEXT,
+                     category TEXT,
+                     importance REAL,
+                     urgency REAL,
+                     location TEXT,
+                     people TEXT,
+                     tags TEXT,
+                     context TEXT,
+                     reminder_date TEXT,
+                     last_accessed TEXT)''')
+        
+        # Table pour les relations entre souvenirs
+        c.execute('''CREATE TABLE IF NOT EXISTS memory_relations
+                    (memory_id1 INTEGER,
+                     memory_id2 INTEGER,
+                     relation_type TEXT,
+                     strength REAL)''')
+        
+        conn.commit()
+        conn.close()
+
+    def add_memory(self, content, category=None, importance=0.5, urgency=0.0,
+                  location=None, people=None, tags=None, context=None, 
+                  reminder_date=None):
+        """Ajoute un nouveau souvenir avec des métadonnées enrichies"""
+        
+        # Auto-catégorisation si non spécifiée
+        if category is None:
+            category = self._auto_categorize(content)
             
-        # Mise à jour des vecteurs
-        self._update_memory_vectors(memory)
+        # Conversion des tags en chaîne JSON
+        tags_json = json.dumps(tags) if tags else "[]"
         
-        # Nettoyage si nécessaire
-        self._cleanup_memories()
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
         
-        # Sauvegarder
-        self.save_memories()
+        c.execute("""INSERT INTO memories 
+                    (timestamp, content, category, importance, urgency,
+                     location, people, tags, context, reminder_date, last_accessed)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 (datetime.now().isoformat(), content, category, importance, urgency,
+                  location, people, tags_json, context, reminder_date, 
+                  datetime.now().isoformat()))
+        
+        memory_id = c.lastrowid
+        conn.commit()
+        conn.close()
+        
+        # Mise à jour du graphe de relations
+        self._update_memory_relations(memory_id, content)
+        
+        return memory_id
 
-    def get_relevant_memories(self, query, n=5):
-        query_vector = self.vectorizer.transform([query])
-        similarities = []
+    def _auto_categorize(self, content):
+        """Catégorise automatiquement un souvenir basé sur son contenu"""
+        content_lower = content.lower()
+        for category, keywords in self.categories.items():
+            if any(keyword in content_lower for keyword in keywords):
+                return category
+        return 'general'
+
+    def get_urgent_reminders(self):
+        """Récupère les souvenirs urgents et les rappels"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        now = datetime.now().isoformat()
         
-        for memory_type in ['permanent', 'long_term', 'short_term']:
-            for memory in self.memories[memory_type]:
-                if memory['content'] in self.memory_vectors:
-                    similarity = cosine_similarity(
-                        query_vector,
-                        self.memory_vectors[memory['content']]
-                    )[0][0]
-                    similarities.append((memory, similarity))
+        reminders = c.execute("""SELECT id, content, category, importance, urgency
+                               FROM memories
+                               WHERE reminder_date <= ? AND reminder_date IS NOT NULL
+                               ORDER BY urgency DESC, importance DESC""", (now,)).fetchall()
+        conn.close()
+        return reminders
+
+    def search_memories(self, query, context=None, category=None, 
+                       date_range=None, min_importance=0.0):
+        """Recherche avancée dans les souvenirs"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        base_query = """SELECT id, content, category, importance, timestamp 
+                       FROM memories WHERE 1=1"""
+        params = []
+        
+        if category:
+            base_query += " AND category = ?"
+            params.append(category)
+            
+        if date_range:
+            start_date, end_date = date_range
+            base_query += " AND timestamp BETWEEN ? AND ?"
+            params.extend([start_date.isoformat(), end_date.isoformat()])
+            
+        if min_importance > 0:
+            base_query += " AND importance >= ?"
+            params.append(min_importance)
+            
+        memories = c.execute(base_query, params).fetchall()
+        conn.close()
+        
+        if not memories:
+            return []
+            
+        # Recherche sémantique
+        texts = [m[1] for m in memories]  # Extraction du contenu
+        vectors = self.vectorizer.fit_transform([query] + texts)
+        similarities = cosine_similarity(vectors[0:1], vectors[1:])[0]
+        
+        # Combiner les résultats avec les métadonnées
+        results = [(memories[i], similarities[i]) 
+                  for i in range(len(memories))]
         
         # Trier par similarité et importance
-        sorted_memories = sorted(
-            similarities,
-            key=lambda x: (x[1], x[0]['importance']),
-            reverse=True
-        )
+        results.sort(key=lambda x: (x[1], x[0][3]), reverse=True)
         
-        return [m[0] for m in sorted_memories[:n]]
+        return results
 
-    def update_importance(self, memory_id, new_importance):
-        for memory_type in self.memories:
-            for memory in self.memories[memory_type]:
-                if memory.get('id') == memory_id:
-                    memory['importance'] = new_importance
-                    memory['last_accessed'] = str(datetime.now())
-                    memory['access_count'] += 1
-                    self.save_memories()
-                    return True
-        return False
+    def update_memory_importance(self, memory_id, importance_delta=0.1):
+        """Met à jour l'importance d'un souvenir basé sur son utilisation"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        c.execute("""UPDATE memories 
+                    SET importance = MIN(1.0, importance + ?),
+                        last_accessed = ?
+                    WHERE id = ?""",
+                 (importance_delta, datetime.now().isoformat(), memory_id))
+        
+        conn.commit()
+        conn.close()
 
-    def forget_old_memories(self, days_threshold=30):
-        current_time = datetime.now()
-        for memory_type in ['short_term', 'long_term']:
-            self.memories[memory_type] = [
-                m for m in self.memories[memory_type]
-                if (current_time - datetime.strptime(m['timestamp'], '%Y-%m-%d %H:%M:%S.%f')).days < days_threshold
-                or m['importance'] >= self.importance_threshold
-            ]
-        self.save_memories()
+    def get_daily_summary(self, date=None):
+        """Génère un résumé quotidien structuré"""
+        if date is None:
+            date = datetime.now().date()
+            
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        start = datetime.combine(date, datetime.min.time()).isoformat()
+        end = datetime.combine(date, datetime.max.time()).isoformat()
+        
+        memories = c.execute("""SELECT category, content, importance, urgency, 
+                                      location, people, tags
+                               FROM memories 
+                               WHERE timestamp BETWEEN ? AND ?
+                               ORDER BY urgency DESC, importance DESC""",
+                           (start, end)).fetchall()
+        
+        conn.close()
+        
+        summary = defaultdict(list)
+        for memory in memories:
+            category, content, importance, urgency, location, people, tags = memory
+            summary[category].append({
+                'content': content,
+                'importance': importance,
+                'urgency': urgency,
+                'location': location,
+                'people': people,
+                'tags': json.loads(tags)
+            })
+            
+        return dict(summary)
 
-    def _update_memory_vectors(self, memory):
-        texts = [m['content'] for m in self.memories['short_term'] + 
-                self.memories['long_term'] + self.memories['permanent']]
-        if texts:
-            self.vectorizer.fit(texts)
-            self.memory_vectors = {
-                text: self.vectorizer.transform([text]) 
-                for text in texts
-            }
+    def export_memories(self, format='json', start_date=None, end_date=None):
+        """Exporte les souvenirs dans différents formats"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        query = "SELECT * FROM memories"
+        params = []
+        
+        if start_date and end_date:
+            query += " WHERE timestamp BETWEEN ? AND ?"
+            params.extend([start_date.isoformat(), end_date.isoformat()])
+            
+        memories = c.execute(query, params).fetchall()
+        conn.close()
+        
+        if format == 'json':
+            return json.dumps(memories, indent=2)
+        elif format == 'txt':
+            return '\n\n'.join([f"{m[1]}: {m[2]}" for m in memories])
+        else:
+            raise ValueError(f"Format non supporté: {format}")
 
-    def _cleanup_memories(self):
-        if len(self.memories['short_term']) > self.max_memories:
-            # Garder les plus importants et les plus récents
-            self.memories['short_term'].sort(
-                key=lambda x: (x['importance'], x['timestamp']),
-                reverse=True
-            )
-            self.memories['short_term'] = self.memories['short_term'][:self.max_memories]
+    def import_memories(self, data, format='json'):
+        """Importe des souvenirs depuis différents formats"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        if format == 'json':
+            memories = json.loads(data)
+            for memory in memories:
+                c.execute("""INSERT INTO memories VALUES 
+                           (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", memory)
+                
+        conn.commit()
+        conn.close()
 
-    def add_user_preference(self, user, preference_type, value):
-        self.memory_categories['user_preferences'][user][preference_type] = {
-            'value': value,
-            'timestamp': str(datetime.now())
-        }
-        self.save_memories()
-
-    def get_user_preferences(self, user):
-        return dict(self.memory_categories['user_preferences'].get(user, {}))
-
-    def add_learned_topic(self, topic, content):
-        self.memory_categories['learned_topics'][topic].append({
-            'content': content,
-            'timestamp': str(datetime.now())
-        })
-        self.save_memories()
-
-    def get_learned_topics(self, topic=None):
-        if topic:
-            return self.memory_categories['learned_topics'].get(topic, [])
-        return dict(self.memory_categories['learned_topics'])
+    def _update_memory_relations(self, memory_id, content):
+        """Met à jour les relations entre les souvenirs"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        # Rechercher des souvenirs similaires
+        existing_memories = c.execute("""SELECT id, content FROM memories 
+                                       WHERE id != ?""", (memory_id,)).fetchall()
+        
+        if existing_memories:
+            texts = [m[1] for m in existing_memories]
+            vectors = self.vectorizer.fit_transform([content] + texts)
+            similarities = cosine_similarity(vectors[0:1], vectors[1:])[0]
+            
+            # Créer des relations pour les souvenirs similaires
+            for i, similarity in enumerate(similarities):
+                if similarity > 0.3:  # Seuil de similarité
+                    c.execute("""INSERT INTO memory_relations VALUES (?, ?, ?, ?)""",
+                             (memory_id, existing_memories[i][0], 
+                              'similar', float(similarity)))
+        
+        conn.commit()
+        conn.close()
