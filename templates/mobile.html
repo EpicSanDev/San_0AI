@@ -5,84 +5,231 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>San AI - Mobile</title>
     <link rel="manifest" href="/manifest.json">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
     <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+
         body {
             margin: 0;
-            padding: 20px;
-            font-family: Arial, sans-serif;
-            background-color: #f0f0f0;
+            padding: 0;
+            background: linear-gradient(135deg, #1a1a1a, #2d2d2d);
+            color: #ffffff;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
         }
-        .chat-container {
-            max-width: 100%;
-            background: white;
-            border-radius: 10px;
+
+        .header {
             padding: 15px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-        }
-        .message-input {
-            width: 100%;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            margin-top: 10px;
-            box-sizing: border-box;
-        }
-        .send-button {
-            width: 100%;
-            padding: 10px;
-            background: #007bff;
-            color: white;
-            border: none;
-            border-radius: 5px;
-            margin-top: 10px;
-            cursor: pointer;
-        }
-        .chat-messages {
-            height: 70vh;
-            overflow-y: auto;
-            padding: 10px;
-        }
-        .message {
-            margin: 10px 0;
-            padding: 10px;
-            border-radius: 5px;
-        }
-        .user-message {
-            background: #007bff;
-            color: white;
-            margin-left: 20%;
-        }
-        .ai-message {
-            background: #e9ecef;
-            color: black;
-            margin-right: 20%;
-        }
-        .status-indicator {
+            background: rgba(0, 0, 0, 0.2);
+            backdrop-filter: blur(10px);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
             position: fixed;
-            top: 20px;
-            right: 20px;
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background-color: #ccc;
+            top: 0;
+            width: 100%;
+            z-index: 100;
         }
+
+        .header-title {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #fff;
+        }
+
+        .status-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background-color: #666;
+        }
+
         .status-indicator.listening {
             background-color: #4CAF50;
+            box-shadow: 0 0 10px #4CAF50;
             animation: pulse 2s infinite;
         }
+
+        .chat-container {
+            flex: 1;
+            margin-top: 60px;
+            margin-bottom: 70px;
+            overflow-y: auto;
+            padding: 15px;
+        }
+
+        .message {
+            margin: 10px 0;
+            padding: 12px 15px;
+            border-radius: 15px;
+            max-width: 80%;
+            animation: fadeIn 0.3s ease-out;
+        }
+
+        .user-message {
+            background: #0084ff;
+            margin-left: auto;
+            border-bottom-right-radius: 5px;
+        }
+
+        .ai-message {
+            background: #333;
+            margin-right: auto;
+            border-bottom-left-radius: 5px;
+        }
+
+        .input-container {
+            position: fixed;
+            bottom: 0;
+            width: 100%;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(10px);
+            display: flex;
+            gap: 10px;
+        }
+
+        .message-input {
+            flex: 1;
+            padding: 12px;
+            border: none;
+            border-radius: 25px;
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            font-size: 16px;
+        }
+
+        .message-input::placeholder {
+            color: rgba(255, 255, 255, 0.5);
+        }
+
+        .action-button {
+            width: 45px;
+            height: 45px;
+            border: none;
+            border-radius: 50%;
+            background: #0084ff;
+            color: white;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s ease;
+        }
+
+        .action-button:active {
+            transform: scale(0.95);
+            background: #0073e6;
+        }
+
+        .toolbar {
+            display: flex;
+            gap: 10px;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 20px;
+            margin-bottom: 10px;
+        }
+
+        .tool-button {
+            padding: 5px 10px;
+            border: none;
+            border-radius: 15px;
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            cursor: pointer;
+        }
+
+        .tool-button.active {
+            background: #0084ff;
+        }
+
         @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.5; }
-            100% { opacity: 1; }
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.2); opacity: 0.5; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .timestamp {
+            font-size: 0.7em;
+            opacity: 0.7;
+            margin-top: 5px;
+        }
+
+        .message-content {
+            margin-bottom: 5px;
+        }
+
+        .voice-wave {
+            position: absolute;
+            bottom: 80px;
+            left: 0;
+            right: 0;
+            height: 40px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 3px;
+        }
+
+        .wave-bar {
+            width: 3px;
+            height: 20px;
+            background: #0084ff;
+            border-radius: 3px;
+            animation: wave 1s ease-in-out infinite;
+        }
+
+        @keyframes wave {
+            0%, 100% { transform: scaleY(0.5); }
+            50% { transform: scaleY(1); }
         }
     </style>
 </head>
 <body>
-    <div class="status-indicator" id="statusIndicator"></div>
-    <div class="chat-container">
-        <div class="chat-messages" id="chatMessages"></div>
-        <input type="text" class="message-input" id="messageInput" placeholder="Écrivez votre message...">
-        <button class="send-button" onclick="sendMessage()">Envoyer</button>
+    <div class="header">
+        <span class="header-title">San AI</span>
+        <div class="status-container">
+            <span class="status-text">En écoute</span>
+            <div class="status-indicator" id="statusIndicator"></div>
+        </div>
+    </div>
+
+    <div class="chat-container" id="chatMessages"></div>
+
+    <div class="voice-wave" id="voiceWave" style="display: none;">
+        <div class="wave-bar" style="animation-delay: -1.2s"></div>
+        <div class="wave-bar" style="animation-delay: -1.0s"></div>
+        <div class="wave-bar" style="animation-delay: -0.8s"></div>
+        <div class="wave-bar" style="animation-delay: -0.6s"></div>
+        <div class="wave-bar" style="animation-delay: -0.4s"></div>
+    </div>
+
+    <div class="input-container">
+        <input type="text" class="message-input" id="messageInput" placeholder="Message à San...">
+        <button class="action-button" onclick="toggleVoice()" id="voiceButton">
+            <i class="material-icons">mic</i>
+        </button>
+        <button class="action-button" onclick="sendMessage()">
+            <i class="material-icons">send</i>
+        </button>
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
@@ -90,7 +237,17 @@
         let socket;
         let mediaRecorder;
         let isListening = false;
+        let isRecording = false;
         const statusIndicator = document.getElementById('statusIndicator');
+        const voiceWave = document.getElementById('voiceWave');
+        const voiceButton = document.getElementById('voiceButton');
+
+        function formatTimestamp(date) {
+            return new Date(date).toLocaleTimeString('fr-FR', {
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+        }
 
         async function initializeAudio() {
             try {
@@ -114,22 +271,21 @@
                 };
 
                 socket.on('transcription', (data) => {
-                    addMessage('Vous', data.text);
+                    if (data.text.trim()) {
+                        addMessage('Vous', data.text);
+                    }
                 });
 
                 socket.on('response', (data) => {
                     if (data.text) {
                         addMessage('San', data.text);
-                        // Jouer la réponse audio si disponible
                         if (data.audio_path) {
-                            const audio = new Audio(`/static/audio/${data.audio_path}`);
-                            audio.play();
+                            playAudioResponse(data.audio_path);
                         }
                     }
                 });
 
-                // Démarrer l'enregistrement continu
-                startContinuousRecording();
+                statusIndicator.classList.add('listening');
                 
             } catch (err) {
                 console.error('Erreur:', err);
@@ -137,19 +293,50 @@
             }
         }
 
-        function startContinuousRecording() {
-            isListening = true;
-            statusIndicator.classList.add('listening');
-            
-            // Enregistrer par segments de 2 secondes
+        function toggleVoice() {
+            if (!isRecording) {
+                startRecording();
+            } else {
+                stopRecording();
+            }
+        }
+
+        function startRecording() {
+            isRecording = true;
+            voiceButton.style.background = '#ff4444';
+            voiceButton.querySelector('i').textContent = 'mic_off';
+            voiceWave.style.display = 'flex';
             mediaRecorder.start(2000);
+        }
+
+        function stopRecording() {
+            isRecording = false;
+            voiceButton.style.background = '#0084ff';
+            voiceButton.querySelector('i').textContent = 'mic';
+            voiceWave.style.display = 'none';
+            mediaRecorder.stop();
+        }
+
+        function playAudioResponse(audioPath) {
+            const audio = new Audio(`/static/audio/${audioPath}`);
+            audio.play();
         }
 
         function addMessage(sender, text) {
             const chat = document.getElementById('chatMessages');
             const msg = document.createElement('div');
             msg.className = `message ${sender === 'Vous' ? 'user-message' : 'ai-message'}`;
-            msg.textContent = text;
+            
+            const content = document.createElement('div');
+            content.className = 'message-content';
+            content.textContent = text;
+            
+            const timestamp = document.createElement('div');
+            timestamp.className = 'timestamp';
+            timestamp.textContent = formatTimestamp(new Date());
+            
+            msg.appendChild(content);
+            msg.appendChild(timestamp);
             chat.appendChild(msg);
             chat.scrollTop = chat.scrollHeight;
         }
@@ -159,7 +346,7 @@
             const message = input.value.trim();
             
             if (message) {
-                addMessage(message, true);
+                addMessage('Vous', message);
                 input.value = '';
 
                 try {
@@ -173,24 +360,40 @@
 
                     const data = await response.json();
                     if (data.response) {
-                        addMessage(data.response, false);
+                        addMessage('San', data.response);
                     }
                 } catch (error) {
                     console.error('Erreur:', error);
-                    addMessage("Désolé, une erreur s'est produite.", false);
+                    addMessage('Système', "Désolé, une erreur s'est produite.");
                 }
             }
         }
 
-        // Permettre l'envoi avec la touche Entrée
         document.getElementById('messageInput').addEventListener('keypress', function(e) {
             if (e.key === 'Enter') {
                 sendMessage();
             }
         });
 
-        // Initialiser quand la page est chargée
+        // Initialisation
         document.addEventListener('DOMContentLoaded', initializeAudio);
+
+        // Support du mode sombre/clair du système
+        if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+            document.body.style.background = 'linear-gradient(135deg, #f0f0f0, #e0e0e0)';
+            document.body.style.color = '#000000';
+        }
+
+        // Installation en tant que PWA
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js')
+                .then(registration => {
+                    console.log('ServiceWorker enregistré avec succès');
+                })
+                .catch(err => {
+                    console.error('Erreur d\'enregistrement du ServiceWorker:', err);
+                });
+        }
     </script>
 </body>
 </html>

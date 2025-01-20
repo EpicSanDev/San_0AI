@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, render_template, send_file
 from flask_socketio import SocketIO, emit
+from voice_profile_manager import VoiceProfileManager  # Ajout de l'import
 import queue
 import threading
 import whisper
@@ -26,7 +27,7 @@ import requests
 from datetime import datetime, timedelta
 import importlib.util
 import glob
-from collections import defaultdict
+from collections import defaultdict, Counter
 import re
 from dateutil.parser import parse
 from datetime import datetime, timedelta
@@ -77,31 +78,81 @@ class VoiceHandler:
         self.min_signal_level = 0.1  # Niveau minimal du signal
         self.frame_duration = 0.5  # Durée d'une frame en secondes
 
+        # Ajout de nouveaux paramètres pour améliorer la reconnaissance
+        self.chunk_size = 1024
+        self.format = sr.AudioData
+        self.rate = 44100  # Augmentation de la fréquence d'échantillonnage
+        self.device_index = None  # Auto-sélection du meilleur périphérique
+        self.timeout = 5  # Timeout en secondes
+        self.phrase_threshold = 0.3  # Seuil de détection de phrase
+        self.non_speaking_duration = 0.5  # Durée de silence pour fin de phrase
+        
+        # Configuration avancée de Whisper
+        self.whisper_config = {
+            'language': 'fr',
+            'task': 'transcribe',
+            'temperature': 0.2,
+            'no_speech_threshold': 0.3,  # Plus sensible
+            'logprob_threshold': -1.0,
+            'condition_on_previous_text': True,
+            'best_of': 3  # Prend la meilleure parmi 3 tentatives
+        }
+        
+        try:
+            # Test du microphone
+            with sr.Microphone() as source:
+                self.recognizer.adjust_for_ambient_noise(source)
+                print("Microphone initialisé avec succès")
+        except Exception as e:
+            print(f"Erreur d'initialisation du microphone: {e}")
+            print("Périphériques audio disponibles:")
+            for index, name in enumerate(sr.Microphone.list_microphone_names()):
+                print(f"Microphone {index}: {name}")
+
     def speech_to_text(self, audio_file):
         try:
-            # Amélioration du prétraitement audio
+            print("Début de la transcription...")
+            
+            # Vérification du fichier audio
+            if not os.path.exists(audio_file):
+                raise FileNotFoundError(f"Fichier audio non trouvé: {audio_file}")
+            
+            # Vérification de la taille du fichier
+            if os.path.getsize(audio_file) < 100:  # Taille minimale en octets
+                raise ValueError("Fichier audio trop petit ou corrompu")
+            
+            # Application de la réduction de bruit
             if self.noise_reduction:
-                # Appliquer la réduction de bruit
-                audio_data = self._reduce_noise(audio_file)
-            else:
-                audio_data = audio_file
-
-            # Augmenter la précision de la reconnaissance
+                filtered_file = self._reduce_noise(audio_file)
+                if filtered_file:
+                    audio_file = filtered_file
+                    
+            print("Traitement de l'audio avec Whisper...")
             result = self.model.transcribe(
-                audio_data,
-                language="fr",
-                task="transcribe",
-                temperature=0.2,
-                no_speech_threshold=0.6,
-                logprob_threshold=None
+                audio_file,
+                **self.whisper_config
             )
             
             text = result["text"].strip()
-            print(f"Texte reconnu amélioré: {text}")
+            confidence = result.get("confidence", 0)
+            
+            print(f"Texte reconnu: '{text}' (confiance: {confidence:.2f})")
+            
+            # Validation du résultat
+            if not text or confidence < 0.5:
+                print("Confiance trop faible, nouvelle tentative...")
+                # Deuxième tentative avec des paramètres plus permissifs
+                self.whisper_config['temperature'] = 0.4
+                result = self.model.transcribe(audio_file, **self.whisper_config)
+                text = result["text"].strip()
+                self.whisper_config['temperature'] = 0.2  # Retour aux paramètres normaux
+            
             return text
 
         except Exception as e:
-            print(f"Erreur dans speech_to_text amélioré: {e}")
+            print(f"Erreur détaillée dans speech_to_text: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return ""
 
     def text_to_speech(self, text, lang='fr'):
@@ -208,115 +259,120 @@ class VoiceHandler:
 
     def process_stream(self, audio_data):
         try:
-            print("Réception de données audio...")
+            print("Début du traitement du flux audio...")
             
             if not audio_data:
-                print("Données audio vides")
-                socketio.emit('error', {'message': 'Audio non détecté'})
-                return
+                raise ValueError("Données audio vides")
 
-            # Créer un fichier temporaire WAV
-            temp_path = os.path.join(self.temp_dir, f'temp_{datetime.now().timestamp()}.wav')
+            # Décodage et validation des données audio
+            decoded_audio = self._decode_audio_data(audio_data)
+            if not decoded_audio:
+                raise ValueError("Échec du décodage audio")
+
+            # Création du fichier temporaire
+            temp_path = self._create_temp_file(decoded_audio)
             
             try:
-                # Decoder les données base64 si nécessaire
-                if isinstance(audio_data, str):
-                    if ',' in audio_data:
-                        audio_data = audio_data.split(',')[1]
-                    import base64
-                    audio_data = base64.b64decode(audio_data)
+                # Analyse de la qualité audio
+                audio_quality = self._check_audio_quality(temp_path)
+                if not audio_quality['is_valid']:
+                    raise ValueError(f"Qualité audio insuffisante: {audio_quality['reason']}")
 
-                # Écrire le fichier WAV avec les bons paramètres
-                with wave.open(temp_path, 'wb') as wf:
-                    wf.setnchannels(self.channels)
-                    wf.setsampwidth(2)  # 16-bit
-                    wf.setframerate(self.sample_rate)
-                    wf.writeframes(audio_data)
-
-                print(f"Fichier temporaire créé: {temp_path}")
-                
-                # Vérifier la durée du fichier audio
-                with wave.open(temp_path, 'rb') as wf:
-                    duration = wf.getnframes() / float(wf.getframerate())
-                    print(f"Durée audio: {duration}s")
-                    
-                    if duration < self.min_audio_length:
-                        print("Audio trop court")
-                        return
-
-                # Vérification du niveau sonore avant traitement
-                with wave.open(temp_path, 'rb') as wf:
-                    frames = wf.readframes(wf.getnframes())
-                    audio_array = np.frombuffer(frames, dtype=np.int16)
-                    audio_array = audio_array.astype(np.float32) / 32768.0
-                    
-                    # Calcul du niveau sonore
-                    rms = np.sqrt(np.mean(np.square(audio_array)))
-                    if rms < self.noise_threshold:
-                        print("Niveau sonore trop faible")
-                        socketio.emit('error', {'message': 'Voix trop faible, parlez plus fort'})
-                        return
-                
-                # Réduction du bruit
-                filtered_path = self._reduce_noise(temp_path)
-                if filtered_path is None:
-                    print("Signal audio rejeté - trop de bruit")
-                    socketio.emit('error', {'message': 'Trop de bruit, essayez dans un environnement plus calme'})
-                    return
-                
-                # Traiter l'audio filtré
-                text = self.speech_to_text(filtered_path)
+                # Traitement de l'audio
+                text = self.speech_to_text(temp_path)
                 
                 if not text.strip():
-                    print("Aucun texte détecté")
-                    socketio.emit('error', {'message': 'Parole non détectée'})
-                    return
+                    raise ValueError("Aucun texte détecté dans l'audio")
                 
-                print(f"Texte détecté: {text}")
-                now = datetime.now()
+                print(f"Texte détecté avec succès: {text}")
                 
-                if now - self.last_transcription_time >= self.min_silence_duration:
-                    self.last_transcription_time = now
-                    socketio.emit('transcription', {'text': text})
-                    
-                    response = ai.process_input(text)
-                    if response:
-                        try:
-                            audio_path = self.text_to_speech(response)
-                            if audio_path:
-                                socketio.emit('response', {
-                                    'text': response,
-                                    'audio_path': audio_path,
-                                    'success': True
-                                })
-                            else:
-                                socketio.emit('response', {
-                                    'text': response,
-                                    'success': False,
-                                    'message': 'Erreur de synthèse vocale'
-                                })
-                        except Exception as e:
-                            print(f"Erreur de synthèse vocale: {e}")
-                            socketio.emit('response', {
-                                'text': response,
-                                'success': False,
-                                'message': 'Erreur lors de la génération audio'
-                            })
+                # Émission du résultat
+                self._emit_result(text)
+                
+                return True
 
             finally:
-                # Nettoyage
-                try:
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
-                except Exception as e:
-                    print(f"Erreur lors du nettoyage: {e}")
-
+                self._cleanup_temp_file(temp_path)
+                
         except Exception as e:
-            print(f"Erreur dans process_stream: {str(e)}")
-            socketio.emit('error', {
-                'message': 'Erreur dans le traitement audio',
-                'details': str(e)
-            })
+            error_msg = f"Erreur dans process_stream: {str(e)}"
+            print(error_msg)
+            socketio.emit('error', {'message': error_msg})
+            return False
+
+    def _decode_audio_data(self, audio_data):
+        """Décode les données audio depuis base64 ou bytes"""
+        try:
+            if isinstance(audio_data, str):
+                import base64
+                if ',' in audio_data:
+                    audio_data = audio_data.split(',')[1]
+                return base64.b64decode(audio_data)
+            return audio_data
+        except Exception as e:
+            print(f"Erreur de décodage audio: {e}")
+            return None
+
+    def _create_temp_file(self, audio_data):
+        """Crée un fichier temporaire WAV à partir des données audio"""
+        temp_path = os.path.join(self.temp_dir, f'temp_{datetime.now().timestamp()}.wav')
+        try:
+            with wave.open(temp_path, 'wb') as wf:
+                wf.setnchannels(self.channels)
+                wf.setsampwidth(2)
+                wf.setframerate(self.sample_rate)
+                wf.writeframes(audio_data)
+            return temp_path
+        except Exception as e:
+            print(f"Erreur création fichier temporaire: {e}")
+            return None
+
+    def _check_audio_quality(self, audio_path):
+        """Vérifie la qualité de l'audio"""
+        try:
+            with wave.open(audio_path, 'rb') as wf:
+                # Vérification de la durée
+                duration = wf.getnframes() / float(wf.getframerate())
+                if duration < self.min_audio_length:
+                    return {'is_valid': False, 'reason': 'Audio trop court'}
+                
+                # Vérification du niveau sonore
+                frames = wf.readframes(wf.getnframes())
+                audio_array = np.frombuffer(frames, dtype=np.int16)
+                audio_array = audio_array.astype(np.float32) / 32768.0
+                rms = np.sqrt(np.mean(np.square(audio_array)))
+                
+                if rms < self.noise_threshold:
+                    return {'is_valid': False, 'reason': 'Niveau sonore trop faible'}
+                
+                return {'is_valid': True, 'rms': rms, 'duration': duration}
+                
+        except Exception as e:
+            return {'is_valid': False, 'reason': f'Erreur analyse: {str(e)}'}
+
+    def _emit_result(self, text):
+        """Émet le résultat de la reconnaissance vocale"""
+        try:
+            socketio.emit('transcription', {'text': text})
+            response = ai.process_input(text)
+            if response:
+                audio_path = self.text_to_speech(response)
+                if audio_path:
+                    socketio.emit('response', {
+                        'text': response,
+                        'audio_path': audio_path,
+                        'success': True
+                    })
+        except Exception as e:
+            print(f"Erreur émission résultat: {e}")
+
+    def _cleanup_temp_file(self, temp_path):
+        """Nettoie les fichiers temporaires"""
+        try:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception as e:
+            print(f"Erreur nettoyage fichier temporaire: {e}")
 
 class LanguageModel:
     def __init__(self):
@@ -934,6 +990,184 @@ class SpellChecker:
             text = text.replace(error, correction)
         return text
 
+class DialogueManager:
+    def __init__(self):
+        self.conversation_tree = {}
+        self.current_context = None
+        self.fallback_responses = [
+            "Je ne suis pas sûr de comprendre, pouvez-vous reformuler ?",
+            "Pourriez-vous être plus précis ?",
+            "Je ne saisis pas complètement, pouvez-vous expliquer autrement ?"
+        ]
+
+    def manage_dialogue(self, user_input, context):
+        # Analyse du contexte
+        if not self.current_context:
+            self.current_context = self._identify_context(user_input)
+        
+        # Construction de la réponse
+        response = self._build_response(user_input, context)
+        
+        return response
+
+    def _identify_context(self, text):
+        # Ajout de mots-clés pour identifier le contexte
+        contexts = {
+            'question': ['comment', 'pourquoi', 'quand', 'où', 'qui', 'quoi'],
+            'request': ['peux-tu', 'pourrais-tu', 'aide-moi', 'j\'ai besoin'],
+            'statement': ['je pense', 'je crois', 'selon moi']
+        }
+        
+        text_lower = text.lower()
+        for context_type, keywords in contexts.items():
+            if any(keyword in text_lower for keyword in keywords):
+                return context_type
+        
+        return 'general'
+
+    def _build_response(self, user_input, context):
+        response_type = self.current_context if self.current_context else 'general'
+        
+        if response_type == 'question':
+            return self._handle_question(user_input, context)
+        elif response_type == 'request':
+            return self._handle_request(user_input, context)
+        elif response_type == 'statement':
+            return self._handle_statement(user_input, context)
+        
+        return random.choice(self.fallback_responses)
+
+    def _handle_question(self, question, context):
+        # Logique pour répondre aux questions
+        pass
+
+    def _handle_request(self, request, context):
+        # Logique pour gérer les requêtes
+        pass
+
+    def _handle_statement(self, statement, context):
+        # Logique pour répondre aux affirmations
+        pass
+
+class ConversationScenario:
+    def __init__(self):
+        self.scenarios = {
+            'help_request': {
+                'patterns': ['aide-moi', 'besoin d\'aide', 'comment faire', 'peux-tu m\'aider'],
+                'required_info': ['sujet', 'contexte'],
+                'response_template': "Je vais vous aider avec {sujet}. Voici la démarche à suivre: {steps}"
+            },
+            'problem_solving': {
+                'patterns': ['j\'ai un problème', 'ça ne marche pas', 'erreur'],
+                'required_info': ['problème', 'contexte', 'déjà_essayé'],
+                'response_template': "Pour résoudre le problème de {problème}, essayons d'abord {solution}"
+            },
+            'information_request': {
+                'patterns': ['qu\'est-ce que', 'comment', 'pourquoi', 'explique-moi'],
+                'required_info': ['sujet'],
+                'response_template': "Concernant {sujet}, voici ce que je peux vous dire: {explication}"
+            }
+        }
+        self.current_scenario = None
+        self.missing_info = {}
+
+    def identify_scenario(self, text):
+        for scenario, data in self.scenarios.items():
+            if any(pattern in text.lower() for pattern in data['patterns']):
+                return scenario
+        return None
+
+    def get_missing_info(self, scenario, context):
+        required = set(self.scenarios[scenario]['required_info'])
+        available = set(key for key in context if context[key] is not None)
+        return required - available
+
+class FeedbackSystem:
+    def __init__(self):
+        self.feedback_history = []
+        self.feedback_threshold = 0.7
+        self.improvement_suggestions = []
+
+    def add_feedback(self, response, user_reaction, context):
+        feedback = {
+            'response': response,
+            'reaction': user_reaction,
+            'context': context,
+            'timestamp': datetime.now()
+        }
+        self.feedback_history.append(feedback)
+        self.analyze_feedback_patterns()
+
+    def analyze_feedback_patterns(self):
+        recent_feedback = self.feedback_history[-50:]
+        negative_patterns = [f for f in recent_feedback if f['reaction'] == 'negative']
+        if len(negative_patterns) / len(recent_feedback) > (1 - self.feedback_threshold):
+            self.generate_improvement_suggestion(negative_patterns)
+
+    def generate_improvement_suggestion(self, negative_patterns):
+        common_contexts = Counter([f['context'] for f in negative_patterns])
+        most_common = common_contexts.most_common(1)[0]
+        self.improvement_suggestions.append({
+            'context': most_common[0],
+            'frequency': most_common[1],
+            'timestamp': datetime.now()
+        })
+
+class ResponseCache:
+    def __init__(self):
+        self.cache = {}
+        self.max_size = 1000
+        self.ttl = timedelta(hours=1)
+
+    def get_response(self, query):
+        if query in self.cache:
+            entry = self.cache[query]
+            if datetime.now() - entry['timestamp'] < self.ttl:
+                return entry['response']
+            else:
+                del self.cache[query]
+        return None
+
+    def add_response(self, query, response):
+        if len(self.cache) >= self.max_size:
+            oldest = min(self.cache.items(), key=lambda x: x[1]['timestamp'])
+            del self.cache[oldest[0]]
+        
+        self.cache[query] = {
+            'response': response,
+            'timestamp': datetime.now(),
+            'usage_count': 0
+        }
+
+class ConversationStats:
+    def __init__(self):
+        self.stats = {
+            'total_interactions': 0,
+            'cache_hits': 0,
+            'response_times': [],
+            'topic_distribution': Counter(),
+            'session_length': []
+        }
+
+    def log_interaction(self, topic, response_time):
+        self.stats['total_interactions'] += 1
+        self.stats['response_times'].append(response_time)
+        self.stats['topic_distribution'][topic] += 1
+
+    def log_cache_hit(self):
+        self.stats['cache_hits'] += 1
+
+    def log_session_end(self, duration):
+        self.stats['session_length'].append(duration)
+
+    def get_analytics(self):
+        return {
+            'avg_response_time': sum(self.stats['response_times']) / len(self.stats['response_times']),
+            'cache_hit_rate': self.stats['cache_hits'] / self.stats['total_interactions'],
+            'popular_topics': self.stats['topic_distribution'].most_common(5),
+            'avg_session_length': sum(self.stats['session_length']) / len(self.stats['session_length'])
+        }
+
 class SanAI:
     def __init__(self):
         self.name = "San"
@@ -973,6 +1207,18 @@ class SanAI:
             "Quel est le comble pour un électricien ? Ne pas être au courant !",
             # Ajouter d'autres blagues
         ]
+        self.dialogue_manager = DialogueManager()
+        self.last_interaction_time = datetime.now()
+        self.interaction_timeout = timedelta(minutes=5)
+        self.learning_rate = 0.1
+        self.max_context_length = 10
+        self.min_confidence_threshold = 0.6
+        self.conversation_scenario = ConversationScenario()
+        self.feedback_system = FeedbackSystem()
+        self.response_cache = ResponseCache()
+        self.conversation_stats = ConversationStats()
+        self.voice_profile_manager = VoiceProfileManager()
+        self.pending_voice_identification = {}
 
     def is_activated(self, text):
         """Vérifie si l'assistant est appelé dans le texte"""
@@ -1181,7 +1427,7 @@ class SanAI:
 
     def get_response_for_category(self, category, **kwargs):
         # Amélioration des réponses
-        if category not in self.training_data.categories:
+        if (category not in self.training_data.categories):
             # Utiliser le modèle de langage pour générer une réponse appropriée
             context = self.get_context()
             return self.language_model.generate_response(f"Comment répondre à une question de type {category}?", context)
@@ -1316,6 +1562,108 @@ class SanAI:
         """Permet à l'utilisateur de donner un feedback sur une réponse"""
         reward = 1.0 if positive else -0.1
         self.rl.update_reward(response_id, reward)
+
+    def process_input(self, user_input):
+        # Correction orthographique améliorée
+        user_input = self.spell_checker.correct(user_input)
+        
+        # Vérification du timeout
+        now = datetime.now()
+        if now - self.last_interaction_time > self.interaction_timeout:
+            self.context_manager = ContextManager()  # Reset du contexte
+        self.last_interaction_time = now
+        
+        # Vérification de l'activation
+        if not self.is_activated(user_input):
+            return None
+            
+        cleaned_input = ' '.join(word for word in user_input.split() 
+                               if word not in self.activation_keywords)
+                               
+        if not cleaned_input.strip():
+            return "Oui, je vous écoute ?"
+
+        # Obtention du contexte
+        context = self.context_manager.get_context()
+        
+        # Utilisation du DialogueManager pour gérer la conversation
+        response = self.dialogue_manager.manage_dialogue(cleaned_input, context)
+        
+        if not response:  # Si le DialogueManager ne trouve pas de réponse appropriée
+            response = self._process_input_internal(cleaned_input)
+
+        # Mise à jour du contexte et de la mémoire
+        self.context_manager.update_context(cleaned_input, response)
+        self.update_memory(cleaned_input, response)
+        
+        return response
+
+    def update_memory(self, user_input, response):
+        # Stockage intelligent dans la mémoire
+        memory_entry = {
+            "user_input": user_input,
+            "response": response,
+            "timestamp": str(datetime.now()),
+            "context": self.context_manager.get_current_topic()
+        }
+        
+        # Calcul de l'importance
+        importance = self.calculate_importance(user_input, response)
+        
+        if importance > self.min_confidence_threshold:
+            self.long_term_memory.add_memory(
+                f"User: {user_input}\nAssistant: {response}", 
+                importance
+            )
+
+    def calculate_importance(self, user_input, response):
+        # Calcul de l'importance basé sur plusieurs facteurs
+        factors = {
+            'length': len(user_input) / 100,  # Normalisation
+            'sentiment': abs(TextBlob(user_input).sentiment.polarity),
+            'complexity': len(set(user_input.split())) / len(user_input.split()),
+            'question': 1.0 if '?' in user_input else 0.5,
+        }
+        
+        return sum(factors.values()) / len(factors)
+
+    def ask_speaker_identity(self, audio_file, text):
+        """Demande l'identité d'un nouveau locuteur"""
+        response = "J'ai détecté une nouvelle voix. Qui est-ce qui parle ?"
+        self.pending_voice_identification[audio_file] = text
+        return self.voice_handler.text_to_speech(response)
+
+    def add_speaker_identity(self, name, audio_file):
+        """Ajoute l'identité d'un locuteur"""
+        if self.voice_profile_manager.add_voice_profile(name, audio_file):
+            if audio_file in self.pending_voice_identification:
+                text = self.pending_voice_identification[audio_file]
+                self.learn_from_conversation(text, name)
+                del self.pending_voice_identification[audio_file]
+            return f"J'ai enregistré la voix de {name}. Je pourrai maintenant le/la reconnaître."
+        return "Désolé, je n'ai pas pu enregistrer cette voix."
+
+    def learn_from_conversation(self, text, speaker=None):
+        """Apprentissage à partir des conversations avec identification du locuteur"""
+        if speaker:
+            # Ajouter les informations du locuteur à la mémoire
+            self.long_term_memory.add_memory(f"Conversation avec {speaker}: {text}", 
+                                          importance=0.8)
+            
+            # Mettre à jour le contexte
+            self.context_manager.update_context(f"{speaker}: {text}", 
+                                             self._generate_response_for_speaker(speaker))
+        else:
+            # ...existing code for normal learning...
+            pass
+
+    def _generate_response_for_speaker(self, speaker):
+        """Génère une réponse adaptée au locuteur"""
+        speaker_memories = self.long_term_memory.get_speaker_memories(speaker)
+        context = f"Conversation avec {speaker}. "
+        if speaker_memories:
+            context += f"Précédentes interactions: {speaker_memories[-3:]}"
+        return self.language_model.generate_response(context)
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", ping_timeout=60)
