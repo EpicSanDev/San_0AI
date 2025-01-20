@@ -396,6 +396,7 @@ class VoiceHandler:
 
 class LanguageModel:
     def __init__(self):
+        # Initialisation des attributs de base
         self.models = {
             'small': {
                 'name': "asi/gpt-fr-cased-small",
@@ -403,38 +404,113 @@ class LanguageModel:
                 'tokenizer': None
             },
             'large': {
-                # Changement pour un modèle plus puissant adapté à votre config
-                'name': "facebook/xglm-7.5B",  # Modèle multilingue plus performant de 7.5B paramètres
+                'name': "facebook/xglm-7.5B",
                 'model': None,
                 'tokenizer': None
             }
         }
-        self.current_model = 'large'  # Utilisation du modèle large par défaut
-        self.device = "cuda"  # Forcer l'utilisation du GPU
+        self.current_model = 'large'
+        
+        # Détection du processeur et configuration du device
+        self.is_m1 = self._check_apple_silicon()
+        
+        if self.is_m1:
+            print("Processeur Apple Silicon M1 détecté")
+            self.device = "mps"
+            self.model_params = {
+                'mps': {
+                    'device_map': None,
+                    'torch_dtype': torch.float16,
+                    'low_cpu_mem_usage': True,
+                    'use_metal': True
+                },
+                'cpu': {
+                    'device_map': None,
+                    'torch_dtype': torch.float32,
+                    'low_cpu_mem_usage': True
+                }
+            }
+        else:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.model_params = {
+                'cuda': {
+                    'device_map': "auto",
+                    'torch_dtype': torch.float16,
+                    'max_memory': {0: "8GB"},
+                    'load_in_8bit': True
+                },
+                'cpu': {
+                    'device_map': None,
+                    'torch_dtype': torch.float32,
+                    'low_cpu_mem_usage': True
+                }
+            }
+        
+        print(f"Utilisation de: {self.device}")
+        
+        # Autres paramètres
+        self.max_tokens = 512
+        self.repetition_penalty = 1.2
+        
+        # Initialisation du modèle
         self._initialize_default_model()
+
+    def _check_apple_silicon(self):
+        try:
+            import platform
+            return (
+                platform.system() == "Darwin" and 
+                platform.machine() == "arm64" and 
+                hasattr(torch.backends, "mps") and 
+                torch.backends.mps.is_available()
+            )
+        except:
+            return False
 
     def _initialize_default_model(self):
         try:
             model_info = self.models[self.current_model]
             model_info['tokenizer'] = AutoTokenizer.from_pretrained(model_info['name'])
-            model_info['model'] = AutoModelForCausalLM.from_pretrained(
-                model_info['name'],
-                device_map="auto",
-                torch_dtype=torch.float16,  # Utiliser float16 pour optimiser la mémoire GPU
-                max_memory={0: "8GB"},  # Limite pour la VRAM de la RTX 2070 Super
-                load_in_8bit=True,  # Quantification 8-bit pour réduire l'utilisation mémoire
-            ).to(self.device)
+            
+            if self.is_m1:
+                params = self.model_params['mps']
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_info['name'],
+                    **params
+                )
+                model = model.to('mps')
+                model_info['model'] = model
+            else:
+                params = self.model_params[self.device]
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_info['name'],
+                    **params
+                ).to(self.device)
+                model_info['model'] = model
+                
         except Exception as e:
-            print(f"Erreur lors du chargement du modèle large: {e}")
+            print(f"Erreur lors du chargement du modèle: {e}")
+            self._load_fallback_model()
+
+    def _load_fallback_model(self):
+        """Charge un modèle de repli plus petit en cas d'erreur"""
+        try:
+            print("Tentative de chargement du modèle de repli...")
             self.current_model = 'small'
-            model_info = self.models['small']
-            model_info['tokenizer'] = AutoTokenizer.from_pretrained(model_info['name'])
-            model_info['model'] = AutoModelForCausalLM.from_pretrained(
-                model_info['name']
-            ).to(self.device)
+            self._initialize_default_model()
+        except Exception as e:
+            print(f"Impossible de charger le modèle de repli: {e}")
+            raise
+
+    def adjust_parameters(self, speaker, sentiment):
+        """Ajuste les paramètres du modèle selon le locuteur et le sentiment"""
+        base_temp = 0.7
+        if sentiment > 0.5:
+            self.repetition_penalty = 1.1  # Plus créatif pour sentiment positif
+        else:
+            self.repetition_penalty = 1.3  # Plus conservateur pour sentiment négatif
 
     def switch_model(self, model_size):
-        """Change le modèle actif (small/large)"""
         if model_size not in self.models:
             return False
             
@@ -442,10 +518,10 @@ class LanguageModel:
             try:
                 model_info = self.models[model_size]
                 model_info['tokenizer'] = AutoTokenizer.from_pretrained(model_info['name'])
+                params = self.model_params[self.device]
                 model_info['model'] = AutoModelForCausalLM.from_pretrained(
                     model_info['name'],
-                    device_map=None,
-                    torch_dtype=torch.float32
+                    **params
                 ).to(self.device)
             except Exception as e:
                 print(f"Erreur lors du chargement du modèle {model_size}: {e}")
@@ -466,21 +542,53 @@ class LanguageModel:
                 full_prompt = f"Question: {prompt}\nRéponse:"
                 
             inputs = tokenizer(full_prompt, return_tensors="pt", max_length=512, truncation=True)
-            inputs = inputs.to(model.device)  # Déplacer sur le même device que le modèle
+            inputs = inputs.to(model.device)
 
-            output = model.generate(
-                inputs["input_ids"],
-                max_length=self.max_tokens,
-                min_length=5,
-                num_return_sequences=1,
-                temperature=0.7,
-                top_k=50,
-                top_p=0.95,
-                repetition_penalty=self.repetition_penalty,
-                do_sample=True,
-                pad_token_id=tokenizer.eos_token_id,
-                no_repeat_ngram_size=3
-            )
+            if self.is_m1:
+                with torch.no_grad():
+                    output = model.generate(
+                        inputs["input_ids"].to('mps'),
+                        max_length=min(256, self.max_tokens),
+                        min_length=5,
+                        num_return_sequences=1,
+                        temperature=0.7,
+                        top_k=50,
+                        top_p=0.95,
+                        repetition_penalty=self.repetition_penalty,
+                        do_sample=True,
+                        pad_token_id=tokenizer.eos_token_id,
+                        no_repeat_ngram_size=3
+                    )
+            elif self.device == "cpu":
+                torch.cuda.empty_cache()
+                with torch.no_grad():
+                    output = model.generate(
+                        inputs["input_ids"],
+                        max_length=min(512, self.max_tokens),
+                        min_length=5,
+                        num_return_sequences=1,
+                        temperature=0.7,
+                        top_k=50,
+                        top_p=0.95,
+                        repetition_penalty=self.repetition_penalty,
+                        do_sample=True,
+                        pad_token_id=tokenizer.eos_token_id,
+                        no_repeat_ngram_size=3
+                    )
+            else:
+                output = model.generate(
+                    inputs["input_ids"],
+                    max_length=512,
+                    min_length=5,
+                    num_return_sequences=1,
+                    temperature=0.7,
+                    top_k=50,
+                    top_p=0.95,
+                    repetition_penalty=self.repetition_penalty,
+                    do_sample=True,
+                    pad_token_id=tokenizer.eos_token_id,
+                    no_repeat_ngram_size=3
+                )
             
             response = tokenizer.decode(output[0], skip_special_tokens=True)
             response = response.replace(full_prompt, "").strip()
@@ -489,6 +597,26 @@ class LanguageModel:
         except Exception as e:
             print(f"Erreur lors de la génération de réponse: {e}")
             return "Je suis désolé, je ne peux pas générer une réponse pour le moment."
+
+    def get_embedding(self, text):
+        """Génère un embedding pour le texte donné"""
+        try:
+            model_info = self.models[self.current_model]
+            tokenizer = model_info['tokenizer']
+            model = model_info['model']
+            
+            inputs = tokenizer(text, return_tensors="pt", max_length=512, truncation=True)
+            inputs = inputs.to(model.device)
+            
+            with torch.no_grad():
+                outputs = model(**inputs)
+                embeddings = outputs.last_hidden_state.mean(dim=1)
+                
+            return embeddings.cpu().numpy()
+            
+        except Exception as e:
+            print(f"Erreur lors de la génération d'embedding: {e}")
+            return None
 
 class KnowledgeBase:
     def __init__(self):
@@ -1061,7 +1189,7 @@ class DialogueManager:
 
             # Rechercher dans la base de connaissances
             match = self.knowledge_base.find_similar_question(question)
-            if match:
+            if (match):
                 return match
 
             # Analyser le type de question
@@ -1977,14 +2105,6 @@ def handle_connect():
     ai.voice_handler.start_listening()
 
 @socketio.on('audio_stream')
-def handle_audio_stream(audio_data):
-    try:
-        ai.voice_handler.process_stream(audio_data)
-    except Exception as e:
-        print(f"Erreur dans le traitement audio: {str(e)}")
-        # Émettre une erreur au client
-        socketio.emit('error', {'message': 'Erreur dans le traitement audio'})
-
 @socketio.on('continuous_audio')
 def handle_continuous_audio(audio_data):
     try:

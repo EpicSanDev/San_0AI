@@ -29,9 +29,20 @@ San_0AI est un assistant intelligent avancé développé en Python qui combine l
 ## Prérequis 📋
 
 - Python 3.8+
-- CUDA compatible GPU (recommandé)
-- 8GB RAM minimum
+- CUDA compatible GPU (recommandé) ou Apple Silicon M1/M2
+- 8GB RAM minimum (16GB recommandé)
 - Microphone (pour les fonctionnalités vocales)
+
+## Compatibilité matérielle 🖥️
+
+L'assistant supporte les configurations suivantes :
+- NVIDIA GPU (CUDA)
+- Apple Silicon (M1/M2) avec Metal
+- CPU (performances réduites)
+
+### Configuration pour Apple Silicon
+
+Sur Mac M1/M2 :
 
 ## Installation 🚀
 
