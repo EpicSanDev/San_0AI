@@ -201,6 +201,28 @@
             0%, 100% { transform: scaleY(0.5); }
             50% { transform: scaleY(1); }
         }
+
+        .continuous-listen {
+            background: #4CAF50 !important;
+        }
+        
+        .continuous-listen:active {
+            background: #45a049 !important;
+        }
+        
+        .listening-indicator {
+            position: fixed;
+            top: 70px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 5px 15px;
+            background: rgba(76, 175, 80, 0.9);
+            border-radius: 20px;
+            color: white;
+            font-size: 14px;
+            display: none;
+            z-index: 1000;
+        }
     </style>
 </head>
 <body>
@@ -222,8 +244,16 @@
         <div class="wave-bar" style="animation-delay: -0.4s"></div>
     </div>
 
+    <!-- Ajouter l'indicateur d'écoute -->
+    <div class="listening-indicator" id="listeningIndicator">
+        Écoute active...
+    </div>
+    
     <div class="input-container">
         <input type="text" class="message-input" id="messageInput" placeholder="Message à San...">
+        <button class="action-button" onclick="toggleContinuousListening()" id="continuousListenButton">
+            <i class="material-icons">hearing</i>
+        </button>
         <button class="action-button" onclick="toggleVoice()" id="voiceButton">
             <i class="material-icons">mic</i>
         </button>
@@ -394,6 +424,68 @@
                     console.error('Erreur d\'enregistrement du ServiceWorker:', err);
                 });
         }
+
+        let isContinuousListening = false;
+        let continuousMediaRecorder = null;
+        
+        async function toggleContinuousListening() {
+            const button = document.getElementById('continuousListenButton');
+            const indicator = document.getElementById('listeningIndicator');
+            
+            if (!isContinuousListening) {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            sampleRate: 16000
+                        }
+                    });
+                    
+                    continuousMediaRecorder = new MediaRecorder(stream);
+                    
+                    continuousMediaRecorder.ondataavailable = (event) => {
+                        if (event.data.size > 0 && socket) {
+                            socket.emit('continuous_audio', event.data);
+                        }
+                    };
+                    
+                    continuousMediaRecorder.start(1000); // Envoyer des chunks toutes les secondes
+                    isContinuousListening = true;
+                    button.classList.add('continuous-listen');
+                    indicator.style.display = 'block';
+                    
+                } catch (err) {
+                    console.error('Erreur d\'accès au microphone:', err);
+                    addMessage('Système', 'Erreur d\'accès au microphone');
+                }
+            } else {
+                if (continuousMediaRecorder) {
+                    continuousMediaRecorder.stop();
+                    continuousMediaRecorder = null;
+                }
+                isContinuousListening = false;
+                button.classList.remove('continuous-listen');
+                indicator.style.display = 'none';
+            }
+        }
+
+        // Mise à jour des gestionnaires de socket
+        socket.on('continuous_transcription', (data) => {
+            if (data.text.trim()) {
+                addMessage('Vous', data.text);
+            }
+        });
+        
+        // Nettoyer lors de la fermeture
+        window.onbeforeunload = () => {
+            if (continuousMediaRecorder) {
+                continuousMediaRecorder.stop();
+            }
+            if (socket) {
+                socket.disconnect();
+            }
+        };
     </script>
 </body>
 </html>

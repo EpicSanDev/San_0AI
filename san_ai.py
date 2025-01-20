@@ -374,6 +374,25 @@ class VoiceHandler:
         except Exception as e:
             print(f"Erreur nettoyage fichier temporaire: {e}")
 
+    def process_continuous_stream(self, audio_file):
+        """Traite un flux audio continu"""
+        try:
+            # Vérifier si le fichier existe et n'est pas vide
+            if not os.path.exists(audio_file) or os.path.getsize(audio_file) < 100:
+                return None
+                
+            # Convertir l'audio en texte
+            text = self.speech_to_text(audio_file)
+            
+            if text and text.strip():
+                return {'text': text}
+                
+            return None
+            
+        except Exception as e:
+            print(f"Erreur dans process_continuous_stream: {str(e)}")
+            return None
+
 class LanguageModel:
     def __init__(self):
         self.models = {
@@ -383,22 +402,15 @@ class LanguageModel:
                 'tokenizer': None
             },
             'large': {
-                'name': "bigscience/bloom-3b",  # Modèle large multilingue
+                # Changement pour un modèle plus puissant adapté à votre config
+                'name': "facebook/xglm-7.5B",  # Modèle multilingue plus performant de 7.5B paramètres
                 'model': None,
                 'tokenizer': None
             }
         }
-        self.current_model = 'small'  # Modèle par défaut
-        self.device = self._get_device()
+        self.current_model = 'large'  # Utilisation du modèle large par défaut
+        self.device = "cuda"  # Forcer l'utilisation du GPU
         self._initialize_default_model()
-        
-    def _get_device(self):
-        """Détermine le meilleur device disponible pour le modèle"""
-        if torch.cuda.is_available():
-            return "cuda"
-        elif hasattr(torch, 'mps') and torch.backends.mps.is_available():
-            return "mps"
-        return "cpu"
 
     def _initialize_default_model(self):
         try:
@@ -406,16 +418,19 @@ class LanguageModel:
             model_info['tokenizer'] = AutoTokenizer.from_pretrained(model_info['name'])
             model_info['model'] = AutoModelForCausalLM.from_pretrained(
                 model_info['name'],
-                device_map=None,  # Désactiver device_map auto
-                torch_dtype=torch.float32  # Utiliser float32 au lieu de float16
-            ).to(self.device)  # Déplacer explicitement vers le device
+                device_map="auto",
+                torch_dtype=torch.float16,  # Utiliser float16 pour optimiser la mémoire GPU
+                max_memory={0: "8GB"},  # Limite pour la VRAM de la RTX 2070 Super
+                load_in_8bit=True,  # Quantification 8-bit pour réduire l'utilisation mémoire
+            ).to(self.device)
         except Exception as e:
             print(f"Erreur lors du chargement du modèle large: {e}")
-            # Fallback sur le petit modèle
             self.current_model = 'small'
             model_info = self.models['small']
-            model_info['tokenizer'] = GPT2Tokenizer.from_pretrained("gpt2")
-            model_info['model'] = GPT2LMHeadModel.from_pretrained("gpt2").to(self.device)
+            model_info['tokenizer'] = AutoTokenizer.from_pretrained(model_info['name'])
+            model_info['model'] = AutoModelForCausalLM.from_pretrained(
+                model_info['name']
+            ).to(self.device)
 
     def switch_model(self, model_size):
         """Change le modèle actif (small/large)"""
@@ -914,7 +929,7 @@ class EmotionManager(EmotionSystem):
         base_emotion = super().update_emotion(text)
         
         # Ajouter le contexte à l'analyse
-        if context:
+        if (context):
             context_emotion = self._analyze_context(context)
             base_emotion = self._blend_emotions(base_emotion, context_emotion)
             
@@ -1750,6 +1765,38 @@ def handle_audio_stream(audio_data):
         print(f"Erreur dans le traitement audio: {str(e)}")
         # Émettre une erreur au client
         socketio.emit('error', {'message': 'Erreur dans le traitement audio'})
+
+@socketio.on('continuous_audio')
+def handle_continuous_audio(audio_data):
+    try:
+        # Créer un fichier temporaire pour le flux audio
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=True) as tmp_file:
+            # Sauvegarder les données audio
+            tmp_file.write(audio_data)
+            tmp_file.flush()
+            
+            # Traiter l'audio
+            result = ai.voice_handler.process_continuous_stream(tmp_file.name)
+            
+            if result and result.get('text'):
+                # Émettre la transcription
+                socketio.emit('continuous_transcription', {
+                    'text': result['text']
+                })
+                
+                # Traiter la réponse
+                response = ai.process_input(result['text'])
+                if response:
+                    audio_path = ai.voice_handler.text_to_speech(response)
+                    socketio.emit('response', {
+                        'text': response,
+                        'audio_path': audio_path,
+                        'success': True
+                    })
+    
+    except Exception as e:
+        print(f"Erreur dans le traitement audio continu: {str(e)}")
+        socketio.emit('error', {'message': 'Erreur dans le traitement audio continu'})
 
 @socketio.on('disconnect')
 def handle_disconnect():
