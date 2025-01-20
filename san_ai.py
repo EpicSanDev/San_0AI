@@ -177,20 +177,38 @@ class VoiceHandler:
             return None
 
     def _reduce_noise(self, audio_file):
+        """Extrait et réduit le bruit d'un fichier audio en le convertissant d'abord au format WAV"""
         try:
             import numpy as np
             from scipy.io import wavfile
             from scipy import signal
+            from pydub import AudioSegment
+            import soundfile as sf
             
-            # Lecture du fichier audio
-            sample_rate, data = wavfile.read(audio_file)
-            
+            # Convertir d'abord en WAV si nécessaire
+            try:
+                # Tenter de lire directement comme WAV
+                audio_data, sample_rate = sf.read(audio_file)
+            except:
+                # Si échec, convertir d'abord en WAV
+                try:
+                    audio = AudioSegment.from_file(audio_file)
+                    temp_wav = f"{self.temp_dir}/temp_convert_{datetime.now().timestamp()}.wav"
+                    audio.export(temp_wav, format="wav")
+                    audio_data, sample_rate = sf.read(temp_wav)
+                    os.remove(temp_wav)  # Nettoyer le fichier temporaire
+                except Exception as conv_error:
+                    print(f"Erreur de conversion audio: {conv_error}")
+                    return audio_file
+
             # Convertir en float32 pour le traitement
-            if data.dtype != np.float32:
-                data = data.astype(np.float32) / np.iinfo(data.dtype).max
-            
+            if audio_data.dtype != np.float32:
+                audio_data = audio_data.astype(np.float32)
+                if len(audio_data.shape) > 1:  # Si stéréo, convertir en mono
+                    audio_data = audio_data.mean(axis=1)
+
             # Calcul de l'enveloppe du signal
-            envelope = np.abs(signal.hilbert(data))
+            envelope = np.abs(signal.hilbert(audio_data))
             
             # Détection du niveau de bruit
             noise_level = np.percentile(envelope, 10)
@@ -206,7 +224,7 @@ class VoiceHandler:
             low = 80 / nyquist
             high = 3000 / nyquist
             b, a = signal.butter(4, [low, high], btype='band')
-            filtered_data = signal.filtfilt(b, a, data)
+            filtered_data = signal.filtfilt(b, a, audio_data)
             
             # Suppression du bruit
             filtered_data[envelope < noise_level * 2] = 0
@@ -214,9 +232,9 @@ class VoiceHandler:
             # Normalisation
             filtered_data = filtered_data / np.max(np.abs(filtered_data))
             
-            # Sauvegarde du fichier filtré
+            # Sauvegarder le fichier filtré
             temp_file = f"{self.temp_dir}/filtered_{datetime.now().timestamp()}.wav"
-            wavfile.write(temp_file, sample_rate, (filtered_data * 32767).astype(np.int16))
+            sf.write(temp_file, filtered_data, sample_rate)
             
             return temp_file
             
